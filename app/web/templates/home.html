@@ -1,0 +1,275 @@
+{% extends "base.html" %}
+{% set active = 'home' %}
+{% block title %}Watchlists — Watchlistarr{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Watchlists</h1>
+    <p>Everything Watchlistarr is tracking, ranked by its own priority rules.</p>
+  </div>
+  <div class="page-actions">
+    <button class="btn" onclick="runCycle(this)">Run cycle</button>
+    <button class="btn primary" onclick="openAddWatchlist()">+ Add watchlist</button>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="stat">
+    <div class="k">Requested to Seerr</div>
+    <div class="v">{{ stats.added_total }}</div>
+    <div class="d">{{ stats.added_month }} in last 30 days</div>
+  </div>
+  <div class="stat">
+    <div class="k">This week</div>
+    <div class="v">{{ stats.added_week }}</div>
+    <div class="d">requests sent</div>
+  </div>
+  <div class="stat">
+    <div class="k">In watchlists</div>
+    <div class="v">{{ stats.in_lists }}</div>
+    <div class="d">{{ stats.pending }} not yet requested</div>
+  </div>
+  <div class="stat">
+    <div class="k">Watchlists</div>
+    <div class="v">{{ stats.watchlist_count }}</div>
+    <div class="d">configured sources</div>
+  </div>
+</div>
+
+{% if watchlists %}
+<div class="wl-grid" style="margin-bottom:30px">
+  {% for wl in watchlists %}
+  <a class="wl-card {{ 'off' if not wl.enabled }}" href="/watchlist/{{ wl.id }}" style="--accent:{{ wl.accent }}">
+    <h3>{{ wl.name }}</h3>
+    <div class="meta">
+      <span class="pill">{{ {'letterboxd':'Letterboxd','imdb_list':'IMDb List'}[wl.source_type] }}</span>
+      {% if not wl.enabled %}<span class="pill warn">paused</span>{% endif %}
+      {% if wl.last_sync_at %}<span>{{ wl.last_sync_at[:16].replace('T',' ') }} UTC</span>{% else %}<span>never synced</span>{% endif %}
+    </div>
+    <div class="nums">
+      <div><span>{{ wl.last_sync_stats.get('added','') }}{{ '' }}</span><small>in list</small></div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+
+<!-- Recently added, per watchlist -->
+{% for wl in watchlists %}
+<section style="margin-bottom:34px">
+  <div class="rail-wrap">
+    <button class="rail-nav prev" aria-label="Scroll left">‹</button>
+    <div class="rail" data-wl="{{ wl.id }}">
+      <div class="empty" style="padding:26px">Loading…</div>
+    </div>
+    <button class="rail-nav next" aria-label="Scroll right">›</button>
+  </div>
+</section>
+{% endfor %}
+
+<div class="grid-2" style="margin-top:12px">
+  {% for label, key in [('Genres requested','genre'), ('Countries requested','country'), ('Languages requested','language'), ('Decades requested','decade')] %}
+  <div class="card">
+    <div class="card-head"><h2>{{ label }}</h2></div>
+    <div class="card-body">
+      {% if stats.top_facets[key] %}
+        {% set mx = stats.top_facets[key][0].count %}
+        {% for f in stats.top_facets[key] %}
+        <div class="facet-row">
+          <div class="name">{{ f.name }}{% if key == 'decade' %}s{% endif %}</div>
+          <div class="bar"><i style="width:{{ (f.count / mx * 100) | round | int }}%"></i></div>
+          <div class="n">{{ f.count }}</div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="muted" style="margin:0">Nothing requested yet — the breakdown fills in as movies are added.</p>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% else %}
+<div class="empty">
+  <h3>No watchlists yet</h3>
+  <p>Add a Letterboxd list or watchlist to get started.</p>
+  <button class="btn primary" onclick="openAddWatchlist()">+ Add watchlist</button>
+</div>
+{% endif %}
+
+<!-- ---------------------------------------------------------------- add modal -->
+<div class="modal-bg" id="addModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Add watchlist</h3>
+      <button class="x" onclick="closeModal('addModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <label class="fld">
+        <span>Name</span>
+        <input type="text" id="wlName" placeholder="1960s Chinese cinema">
+      </label>
+
+      <label class="fld">
+        <span>Source</span>
+        <select id="wlSource" onchange="renderSourceFields()">
+          <option value="letterboxd">Letterboxd (list or member watchlist)</option>
+          <option value="imdb_list">IMDb List (experimental — often blocked)</option>
+        </select>
+      </label>
+
+      <div id="sourceFields"></div>
+
+      <label class="fld">
+        <span>Starting rules <em class="muted" style="font-weight:400">(optional)</em></span>
+        <select id="wlPreset" onchange="applyPreset(this.value)">
+          <option value="">None — start empty</option>
+          {% for p in catalogue.presets %}
+          <option value="{{ p.id }}">{{ p.name }}</option>
+          {% endfor %}
+        </select>
+        <div class="help">You can tune every point value after creating the watchlist.</div>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" onclick="closeModal('addModal')">Cancel</button>
+      <button class="btn primary" id="wlSave" onclick="saveWatchlist()">Create watchlist</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SOURCE_FIELDS = {
+  letterboxd: `
+    <label class="fld"><span>List URL <em class="muted" style="font-weight:400">(easiest)</em></span>
+      <input type="text" id="wlListUrl" placeholder="https://letterboxd.com/dave/list/best-of-2025/">
+      <div class="help">Paste the whole URL — username and slug fill in automatically.</div>
+    </label>
+    <div class="row">
+      <label class="fld"><span>…or username</span>
+        <input type="text" id="wlUser" placeholder="dave">
+      </label>
+      <label class="fld"><span>…and list slug <em class="muted" style="font-weight:400">(blank = full watchlist)</em></span>
+        <input type="text" id="wlSlug" placeholder="best-of-2025">
+      </label>
+    </div>
+    <label class="fld"><span>Max items</span>
+      <input type="number" id="wlMaxItems" placeholder="0 = all" min="0">
+    </label>`,
+  imdb_list: `
+    <label class="fld"><span>List URL or ID</span>
+      <input type="text" id="wlListUrl" placeholder="https://www.imdb.com/list/ls012733158/">
+      <div class="help">IMDb blocks most datacenter IPs. Use Letterboxd if this errors.</div>
+    </label>`
+};
+
+let PRESETS = {{ catalogue.presets | tojson }};
+
+function renderSourceFields() {
+  document.getElementById('sourceFields').innerHTML = SOURCE_FIELDS[document.getElementById('wlSource').value] || '';
+}
+
+function openAddWatchlist() {
+  document.getElementById('addModal').classList.add('on');
+  renderSourceFields();
+  // Reset every time. Without this the modal reopens holding the previous
+  // watchlist's name/URL and preset, so editing felt broken.
+  document.getElementById('wlName').value = '';
+  document.getElementById('wlListUrl') && (document.getElementById('wlListUrl').value = '');
+  document.getElementById('wlUser') && (document.getElementById('wlUser').value = '');
+  document.getElementById('wlSlug') && (document.getElementById('wlSlug').value = '');
+  document.getElementById('wlMaxItems') && (document.getElementById('wlMaxItems').value = '');
+  document.getElementById('wlPreset').value = '';
+  document.getElementById('wlName').focus();
+}
+function closeModal(id) { document.getElementById(id).classList.remove('on'); }
+
+function applyPreset(id) {
+  const p = PRESETS.find(x => x.id === id);
+  if (p && !document.getElementById('wlName').value.trim()) {
+    document.getElementById('wlName').value = p.name;
+  }
+}
+
+async function saveWatchlist() {
+  const btn = document.getElementById('wlSave');
+  const type = document.getElementById('wlSource').value;
+  const ref = {};
+  const url = (document.getElementById('wlListUrl') || {}).value;
+  if (url && url.trim()) ref.list_url = url.trim();
+  if (type === 'letterboxd') {
+    const u = (document.getElementById('wlUser') || {}).value;
+    const s = (document.getElementById('wlSlug') || {}).value;
+    if (u && u.trim()) ref.username = u.trim();
+    if (s && s.trim()) ref.list_slug = s.trim();
+  }
+  const maxItems = Number((document.getElementById('wlMaxItems') || {}).value || 0);
+  if (maxItems > 0) ref.max_items = maxItems;
+
+  const presetId = document.getElementById('wlPreset').value;
+  const preset = PRESETS.find(x => x.id === presetId);
+  const config = preset
+    ? { max_per_run: 1, rules: preset.rules }
+    : { max_per_run: 1, rules: [] };
+
+  if (!ref.list_url && !ref.username) {
+    toast('Give a list URL or a username.', 'bad'); return;
+  }
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Creating';
+  try {
+    const res = await api('/api/watchlists', {
+      method: 'POST',
+      body: { name: document.getElementById('wlName').value || 'New watchlist', source_type: type, source_ref: ref, config, enabled: true }
+    });
+    closeModal('addModal');
+    toast('Created — now open it to sync and score.', 'ok');
+    setTimeout(() => location.href = '/watchlist/' + res.watchlist.id, 500);
+  } catch (e) {
+    toast(e.message, 'bad');
+    btn.disabled = false; btn.textContent = 'Create watchlist';
+  }
+}
+
+async function runCycle(btn) {
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Running';
+  try {
+    const res = await api('/api/cycle', { method: 'POST' });
+    const okCount = (res.sync || []).reduce((a, s) => a + (s.new || 0), 0);
+    const sent = (res.requests || []).reduce((a, s) => a + (s.requested || 0), 0);
+    toast(`Cycle done — ${okCount} new, ${sent} requested.`, 'ok');
+    setTimeout(() => location.reload(), 1200);
+  } catch (e) {
+    toast('Cycle failed: ' + e.message, 'bad');
+    btn.disabled = false; btn.textContent = 'Run cycle';
+  }
+}
+
+// Load rails for each watchlist
+(async function loadRails() {
+  const rails = document.querySelectorAll('.rail[data-wl]');
+  for (const rail of rails) {
+    try {
+      const data = await api('/api/watchlists/' + rail.dataset.wl);
+      const added = data.added || [];
+      const pending = (data.pending || []).slice(0, 40);
+      if (!added.length && !pending.length) {
+        rail.innerHTML = '<div class="empty" style="padding:26px">Nothing here yet — hit Sync.</div>';
+        continue;
+      }
+      let html = '';
+      if (added.length) {
+        html += added.slice(0, 30).map(c => posterCard(c, { added: true, href: '#' })).join('');
+      }
+      if (pending.length) {
+        html += pending.map(c => posterCard(c, { href: '#' })).join('');
+      }
+      rail.innerHTML = html;
+    } catch (e) {
+      rail.innerHTML = '<div class="empty" style="padding:26px">Could not load.</div>';
+    }
+  }
+})();
+</script>
+{% endblock %}

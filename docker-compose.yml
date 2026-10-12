@@ -1,0 +1,41 @@
+services:
+  watchlistarr:
+    build: .
+    image: watchlistarr:1.6.4
+    container_name: watchlistarr
+    restart: unless-stopped
+    ports:
+      # 7777 on the host as specified. Change the left side to remap.
+      - "7777:7777"
+    volumes:
+      # SQLite DB + logs. Keep this volume or you lose your settings,
+      # tracked movies and the request history.
+      - watchlistarr_data:/data
+    environment:
+      WATCHLISTARR_PORT: "7777"
+      WATCHLISTARR_LOG_LEVEL: "info"
+      # Sync sources every 30 minutes, request cycles every 30 minutes.
+      WATCHLISTARR_SYNC_INTERVAL: "30"
+      WATCHLISTARR_REQUEST_INTERVAL: "30"
+      WATCHLISTARR_SCHEDULER: "true"
+      # Seerr / Radarr are set in the WebUI (Settings -> Integrations) and
+      # stored in the database, so nothing secret lives in this file.
+      # SEERR_URL: "http://jellyseerr:5055"
+      # SEERR_API_KEY: "your-seerr-api-key"
+      # RADARR_URL: "http://radarr:7878"
+      # RADARR_API_KEY: "your-radarr-api-key"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:7777/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  watchlistarr_data:
+    name: watchlistarr_data

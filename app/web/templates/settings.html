@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% set active = 'settings' %}
+{% block title %}Settings — Watchlistarr{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>Settings</h1>
+    <p>Connect your ARR stack and manage the admin login.</p>
+  </div>
+</div>
+
+{% if saved %}<div class="hint ok" style="margin-bottom:18px">Saved: {{ saved }}.</div>{% endif %}
+
+<div class="grid-2">
+  <!-- ------------------------------------------------------- integrations -->
+  <div class="card">
+    <div class="card-head"><h2>Integrations</h2></div>
+    <div class="card-body">
+      <div class="hint" style="margin-bottom:18px">
+        Watchlistarr needs <strong>Seerr</strong> to send requests.
+        <strong>Radarr</strong> is optional but unlocks disk-space and
+        library-count rules. Both accept an API key from
+        <span class="mono">Settings → General</span> in your Seerr/Radarr.
+      </div>
+
+      <label class="fld"><span>Seerr URL</span>
+        <input type="text" id="seerr_url" value="{{ integrations.seerr_url or '' }}" placeholder="http://jellyseerr:5055">
+      </label>
+      <label class="fld"><span>Seerr API key</span>
+        <input type="password" id="seerr_api_key" value="{{ integrations.seerr_api_key or '' }}" placeholder="paste API key">
+        <div class="help">Leave the dots as-is to keep the current key.</div>
+      </label>
+      <button class="btn sm" onclick="testSvc('seerr', this)">Test Seerr connection</button>
+
+      <div style="height:22px"></div>
+
+      <label class="fld"><span>Radarr URL <em class="muted" style="font-weight:400">(optional)</em></span>
+        <input type="text" id="radarr_url" value="{{ integrations.radarr_url or '' }}" placeholder="http://radarr:7878">
+      </label>
+      <label class="fld"><span>Radarr API key</span>
+        <input type="password" id="radarr_api_key" value="{{ integrations.radarr_api_key or '' }}" placeholder="paste API key">
+      </label>
+      <button class="btn sm" onclick="testSvc('radarr', this)">Test Radarr connection</button>
+
+      <div style="height:22px"></div>
+
+      <label class="fld"><span>TMDB API key <em class="muted" style="font-weight:400">(optional)</em></span>
+        <input type="password" id="tmdb_api_key" value="{{ integrations.tmdb_api_key or '' }}" placeholder="free key improves country/language data">
+        <div class="help">Entirely optional — Watchlistarr works keyless by default.</div>
+      </label>
+
+      <label class="switch" style="margin:18px 0">
+        <input type="checkbox" id="requests_enabled" {{ 'checked' if integrations.requests_enabled is not false }}>
+        <span>Allow sending requests to Seerr</span>
+      </label>
+
+      <h3 style="font-size:15px; margin:24px 0 4px">Schedule</h3>
+      <p class="muted" style="font-size:12.5px; margin:0 0 14px; line-height:1.5">
+        How often Watchlistarr re-checks your watchlists for newly added films.
+        Scoring and Letterboxd ratings run automatically as part of each sync, so
+        adding a film to Letterboxd is enough — no buttons to press.
+      </p>
+      <div class="row">
+        <label class="fld">
+          <span>Re-check sources every</span>
+          <select id="sync_frequency_minutes">
+            {% set cur = integrations.sync_frequency_minutes or 60 %}
+            {% for m, lbl in [(15,'15 minutes'),(30,'30 minutes'),(60,'1 hour'),(180,'3 hours'),(360,'6 hours'),(720,'12 hours'),(1440,'1 day (daily)')] %}
+            <option value="{{ m }}" {{ 'selected' if cur|string|int == m }}>{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <div class="help">Scans every watchlist for new films.</div>
+        </label>
+        <label class="fld">
+          <span>Request cycle every</span>
+          <select id="request_frequency_minutes">
+            {% set rcur = integrations.request_frequency_minutes or 60 %}
+            {% for m, lbl in [(30,'30 minutes'),(60,'1 hour'),(180,'3 hours'),(360,'6 hours'),(720,'12 hours'),(1440,'1 day (daily)')] %}
+            <option value="{{ m }}" {{ 'selected' if rcur|string|int == m }}>{{ lbl }}</option>
+            {% endfor %}
+          </select>
+          <div class="help">Sends the top-ranked film to Seerr.</div>
+        </label>
+      </div>
+
+      <h3 style="font-size:15px; margin:24px 0 4px">Storage guards</h3>
+      <p class="muted" style="font-size:12.5px; margin:0 0 14px; line-height:1.5">
+        Global rules applied to every watchlist. Leave blank to disable each one.
+      </p>
+
+      <div class="row">
+        <label class="fld">
+          <span>Minimum free space (GB)</span>
+          <input type="number" id="min_free_gb" min="0" step="1"
+                 value="{{ integrations.min_free_gb or '' }}" placeholder="e.g. 100">
+          <div class="help">Only add films while <strong>at least</strong> this much space is free.</div>
+        </label>
+        <label class="fld">
+          <span>Maximum free space (GB)</span>
+          <input type="number" id="max_free_gb" min="0" step="1"
+                 value="{{ integrations.max_free_gb or '' }}" placeholder="e.g. 500">
+          <div class="help">Keep adding only while free space is <strong>at or below</strong> this, so the drive is never left mostly empty.</div>
+        </label>
+      </div>
+      <label class="fld">
+        <span>Estimated film size (GB)</span>
+        <input type="number" id="est_movie_gb" min="0" step="0.5"
+               value="{{ integrations.est_movie_gb or '' }}" placeholder="e.g. 4">
+        <div class="help">
+          Optional. Used to check that a new request would not push free space
+          past your maximum. Blank skips the look-ahead.
+        </div>
+      </label>
+
+      <h3 style="font-size:15px; margin:20px 0 10px">Release availability</h3>
+      <label class="switch" style="margin:0 0 10px">
+        <input type="checkbox" id="filter_unreleased"
+               {{ 'checked' if integrations.filter_unreleased is not false }}>
+        <span>Skip films with no digital release yet</span>
+      </label>
+      <div class="hint" style="margin-bottom:14px">
+        Held-back films are never deleted — they are re-checked on every sync and
+        become eligible the moment they are released.
+        {% if not integrations.tmdb_api_key %}
+        <div class="hint warn" style="margin-top:10px">
+          <strong>Heuristic accuracy.</strong> Without a TMDB API key this uses a
+          release-date guess, because no free source publishes real digital
+          availability. Add a free TMDB key below for accurate filtering.
+        </div>
+        {% else %}
+        <div class="hint ok" style="margin-top:10px">Using TMDB release dates (accurate).</div>
+        {% endif %}
+      </div>
+
+      <h3 style="font-size:15px; margin:20px 0 10px">Skip films already known</h3>
+      <label class="switch" style="margin:0 0 10px">
+        <input type="checkbox" id="ignore_radarr_existing"
+               {{ 'checked' if integrations.ignore_radarr_existing is not false }}>
+        <span>Ignore anything already in Radarr</span>
+      </label>
+      <div class="hint" style="margin-bottom:14px">
+        Matches on TMDB id, IMDb id, or title+year. Films Radarr still has a
+        record of but whose file you deleted are skipped too, so Watchlistarr
+        will not re-add what you removed on purpose.
+      </div>
+
+      <button class="btn primary" onclick="saveIntegrations()">Save integrations</button>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------------- password -->
+  <div class="card">
+    <div class="card-head"><h2>Admin login</h2></div>
+    <div class="card-body">
+      <label class="fld"><span>Current password</span>
+        <input type="password" id="curPw" autocomplete="current-password">
+      </label>
+      <label class="fld"><span>New password</span>
+        <input type="password" id="newPw" autocomplete="new-password">
+        <div class="help">At least 8 characters.</div>
+      </label>
+      <button class="btn primary" onclick="changePassword()">Change password</button>
+
+      <div style="height:26px"></div>
+
+      <h3 style="font-size:15px; margin:0 0 10px">How Watchlistarr works</h3>
+      <ul class="muted" style="font-size:13px; line-height:1.7; padding-left:20px; margin:0">
+        <li>Pulls movies from your watchlists on a schedule.</li>
+        <li>Enriches each with genre, country, language, year — no login needed.</li>
+        <li>Scores everything with your point sliders.</li>
+        <li>Sends the top movie(s) to Seerr, respecting quotas and disk rules.</li>
+        <li>Remembers what it already added, so nothing is requested twice.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="card" style="margin-top:18px">
+  <div class="card-head"><h2>Sources</h2></div>
+  <div class="card-body">
+    <table class="tbl">
+      <thead><tr><th>Source</th><th>Status</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Letterboxd</strong></td>
+          <td><span class="pill ok">recommended</span></td>
+          <td class="t-sub">Lists and member watchlists, keyless and reliable. RSS is Cloudflare-blocked, so the HTML pages are parsed instead.</td>
+        </tr>
+        <tr>
+          <td><strong>Cinemeta</strong></td>
+          <td><span class="pill ok">keyless</span></td>
+          <td class="t-sub">Metadata: genre, country, year, ratings, IMDb/TMDB ids.</td>
+        </tr>
+        <tr>
+          <td><strong>Wikidata</strong></td>
+          <td><span class="pill ok">keyless</span></td>
+          <td class="t-sub">Fills in language (and refines country) where Cinemeta is blank.</td>
+        </tr>
+        <tr>
+          <td><strong>IMDb Lists</strong></td>
+          <td><span class="pill warn">experimental</span></td>
+          <td class="t-sub">IMDb bot-protection blocks most server IPs; works from some. Prefer Letterboxd.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function saveIntegrations() {
+  const body = {};
+  ['seerr_url','seerr_api_key','radarr_url','radarr_api_key','tmdb_api_key']
+    .forEach(k => body[k] = document.getElementById(k).value.trim());
+  body.requests_enabled = document.getElementById('requests_enabled').checked;
+  // Storage guards: blank means "disabled", so send empty string, not 0.
+  ['min_free_gb','max_free_gb','est_movie_gb'].forEach(k => {
+    const el = document.getElementById(k);
+    body[k] = el && el.value.trim() !== '' ? el.value.trim() : '';
+  });
+  ['sync_frequency_minutes','request_frequency_minutes'].forEach(k => {
+    const el = document.getElementById(k);
+    if (el) body[k] = el.value;
+  });
+  const ig = document.getElementById('ignore_radarr_existing');
+  if (ig) body.ignore_radarr_existing = ig.checked;
+  const fu = document.getElementById('filter_unreleased');
+  if (fu) body.filter_unreleased = fu.checked;
+  try {
+    await api('/api/settings/integrations', { method: 'POST', body });
+    toast('Integrations saved.', 'ok');
+    setTimeout(() => location.reload(), 700);
+  } catch (e) { toast(e.message, 'bad'); }
+}
+
+async function testSvc(svc, btn) {
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Testing';
+  // save first so the test hits the values just typed
+  const body = {};
+  ['seerr_url','seerr_api_key','radarr_url','radarr_api_key'].forEach(k => {
+    const el = document.getElementById(k);
+    body[k] = el.type === 'password' && el.value.trim() === '' ? '••••••••' : el.value.trim();
+  });
+  try { await api('/api/settings/integrations', { method: 'POST', body }); } catch (_) {}
+  try {
+    const r = await api('/api/settings/test/' + svc, { method: 'POST' });
+    toast(r.message, r.ok ? 'ok' : 'bad');
+  } catch (e) { toast(e.message, 'bad'); }
+  btn.disabled = false; btn.textContent = 'Test ' + (svc === 'seerr' ? 'Seerr' : 'Radarr') + ' connection';
+}
+
+async function changePassword() {
+  const cur = document.getElementById('curPw').value;
+  const np = document.getElementById('newPw').value;
+  if (!cur || !np) { toast('Fill in both fields.', 'bad'); return; }
+  try {
+    await api('/api/settings/password', { method: 'POST', body: { current: cur, new: np } });
+    toast('Password changed.', 'ok');
+    document.getElementById('curPw').value = '';
+    document.getElementById('newPw').value = '';
+  } catch (e) { toast(e.message, 'bad'); }
+}
+</script>
+{% endblock %}

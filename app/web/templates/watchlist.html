@@ -1,0 +1,500 @@
+{% extends "base.html" %}
+{% block title %}{{ wl.name }} — Watchlistarr{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1>{{ wl.name }}</h1>
+    <p>
+      <span class="pill">{{ {'letterboxd':'Letterboxd','imdb_list':'IMDb List'}[wl.source_type] }}</span>
+      {% if not wl.enabled %}<span class="pill warn">paused</span>{% endif %}
+      {% if capacity.available %}
+        <span class="pill">💾 {{ capacity.free_gb }} GB free · {{ capacity.movie_count }} movies</span>
+      {% elif capacity.error %}
+        <span class="pill warn" title="{{ capacity.error }}">capacity unknown</span>
+      {% endif %}
+    </p>
+  </div>
+  <div class="page-actions">
+    <button class="btn" onclick="doSync(this)">Sync now</button>
+    <button class="btn primary" onclick="doRequest(this)" title="Requests the highest-scored film, ignoring the Pace limit. Scores are not changed.">Request next</button>
+  </div>
+</div>
+
+<div class="stat-grid">
+  <div class="stat"><div class="k">Requested</div><div class="v">{{ added | length }}</div>
+    <div class="d">sent to Seerr</div></div>
+  <div class="stat"><div class="k">Pending</div><div class="v">{{ pending | length }}</div>
+    <div class="d">scored, waiting</div></div>
+  <div class="stat"><div class="k">This month</div><div class="v">{{ window_counts.month }}</div>
+    <div class="d">{{ window_counts.week }} this week</div></div>
+  <div class="stat"><div class="k">Max per run</div><div class="v">{{ wl.config.get('max_per_run', 1) }}</div>
+    <div class="d">requests per cycle</div></div>
+</div>
+
+<div class="grid-2">
+  <!-- ------------------------------------------------ source + name -->
+  <div class="card">
+    <div class="card-head"><h2>Source</h2></div>
+    <div class="card-body">
+      <label class="fld"><span>Name</span>
+        <input type="text" id="editName" value="{{ wl.name }}">
+      </label>
+      <label class="fld">
+        <span>Letterboxd URL</span>
+        <input type="text" id="editUrl"
+               placeholder="https://letterboxd.com/user/list/slug/  or  https://letterboxd.com/user/watchlist/">
+        <div class="help">
+          A list URL (<code>/user/list/slug/</code>) or a member watchlist
+          (<code>/user/watchlist/</code>) both work.
+        </div>
+      </label>
+      <label class="fld"><span>Max items</span>
+        <input type="number" id="editMaxItems" min="0" placeholder="0 = all"
+               value="{{ (wl.source_ref or {}).get('max_items') or '' }}">
+      </label>
+      <div style="display:flex; gap:10px; align-items:center">
+        <button class="btn primary" id="saveSource" onclick="saveSource()">Save source</button>
+        <span id="sourceHint" class="muted" style="font-size:12.5px"></span>
+      </div>
+      <div class="hint warn" style="margin-top:14px">
+        Changing the URL does <strong>not</strong> delete the movies already
+        tracked. Sync again to pull in the new list; stale entries stay until
+        you delete the watchlist and re-add it.
+      </div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------ sliders / rules -->
+  <div class="card">
+    <div class="card-head">
+      <h2>Priority rules</h2>
+      <span class="spacer"></span>
+      <select id="presetSel" style="width:auto" onchange="applyPreset(this.value)">
+        <option value="">Load a preset…</option>
+        {% for p in catalogue.presets %}
+        <option value="{{ p.id }}">{{ p.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="card-body" id="ruleBox">
+      {% if (wl.config.get('rules') or []) | length == 0 %}
+      <div class="hint warn" style="margin-bottom:14px">
+        <strong>No priority rules yet.</strong> Without rules every film scores the
+        same, so Watchlistarr picks by list order — not by what you actually want.
+      </div>
+      {% elif candidates | map(attribute='score') | unique | list | length <= 2 %}
+      <div class="hint warn" style="margin-bottom:14px">
+        <strong>Most films score the same, so ties are broken by rating.</strong>
+        Every film is scored and ordered — nothing is filtered out. When scores tie
+        the order falls back to Letterboxd rating, then IMDb rating, then your own
+        list order. If you want your rules to matter more, give them more points or
+        add rules that match more films. Letterboxd ratings are fetched
+        automatically when new films are added.
+      </div>
+      {% endif %}
+      <div class="hint" style="margin-bottom:14px">
+        Each rule adds points when a movie matches. Highest total wins.
+        <strong>Quota</strong> and <strong>Disk</strong> rules are hard limits — they
+        stop requests outright instead of adding points.
+      </div>
+      <div class="rules" id="ruleList"></div>
+      <div style="display:flex; gap:9px; margin-top:14px">
+        <button class="btn sm" onclick="addRule({kind:'genre',op:'in',value:[],points:10})">+ Genre</button>
+        <button class="btn sm" onclick="addRule({kind:'country',op:'in',value:[],points:10})">+ Country</button>
+        <button class="btn sm" onclick="addRule({kind:'decade',op:'in',value:[],points:10})">+ Decade</button>
+        <button class="btn sm" onclick="addRule({kind:'rating',op:'gte',value:8,points:20})">+ Rating</button>
+        <button class="btn sm" onclick="addRule({kind:'letterboxd_rating',op:'gte',value:4,points:20})">+ Letterboxd</button>
+        <button class="btn sm" onclick="addRule({kind:'capacity',unit:'free_gb',comparator:'lt',threshold:100,limit:true,points:0})">+ Disk</button>
+        <button class="btn sm" onclick="addRule({kind:'min_free_gb',comparator:'gte',threshold:100,limit:true,points:0})">+ Min free GB</button>
+        <button class="btn sm" onclick="addRule({kind:'max_free_gb',comparator:'lte',threshold:500,threshold2:4,limit:true,points:0})">+ Max free GB</button>
+      </div>
+
+      <h3 style="font-size:15px; margin:20px 0 4px">Pace</h3>
+      <p class="muted" style="font-size:12.5px; margin:0 0 12px; line-height:1.5">
+        Simple X movies per Y time. This is a hard cap: once the limit is reached
+        nothing is requested until the period rolls over.
+      </p>
+      <div class="row">
+        <label class="fld">
+          <span>X — max films</span>
+          <input type="number" id="quotaCount" min="0" step="1"
+                 value="{{ wl.config.get('quota_count') or '' }}" placeholder="e.g. 4">
+          <div class="help">Blank = no cap.</div>
+        </label>
+        <label class="fld">
+          <span>per Y — period</span>
+          <select id="quotaWindow">
+            {% set qw = wl.config.get('quota_window') or 'month' %}
+            {% for w in ['day','week','month','quarter','year'] %}
+            <option value="{{ w }}" {{ 'selected' if qw == w }}>{{ w }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="fld"><span>Max requests per cycle</span>
+          <input type="number" id="maxPerRun" min="0" value="{{ wl.config.get('max_per_run',1) }}">
+        </label>
+        <label class="fld"><span>Quality profile ID <em class="muted" style="font-weight:400">(Seerr)</em></span>
+          <input type="text" id="qualityProfile" value="{{ wl.config.get('quality_profile') or '' }}" placeholder="blank = default">
+        </label>
+        <label class="fld"><span>Root folder <em class="muted" style="font-weight:400">(Seerr)</em></span>
+          <input type="text" id="rootFolder" value="{{ wl.config.get('root_folder') or '' }}" placeholder="blank = default">
+        </label>
+      </div>
+      <label class="fld"><span>Tags added to each request</span>
+        <input type="text" id="tags" value="{{ (wl.config.get('tags') or []) | join(', ') }}" placeholder="watchlistarr, 1960s">
+        <div class="help">Comma separated.</div>
+      </label>
+
+      <div style="display:flex; gap:10px; margin-top:6px">
+        <button class="btn" onclick="toggleEnabled()">{{ 'Pause' if wl.enabled else 'Resume' }}</button>
+        <button class="btn danger" onclick="removeWatchlist()">Delete</button>
+        <span class="spacer"></span>
+        <button class="btn primary" id="saveRules" onclick="saveRules()">Save rules</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ------------------------------------------------ activity -->
+  <div class="card">
+    <div class="card-head"><h2>Recent activity</h2></div>
+    <div class="card-body">
+      {% if recent_runs %}
+      <table class="tbl">
+        <thead><tr><th>When (UTC)</th><th>Result</th><th>Stats</th></tr></thead>
+        <tbody>
+        {% for r in recent_runs[:8] %}
+          <tr>
+            <td class="mono">{{ r.started_at[:16].replace('T',' ') }}</td>
+            <td>
+              {% if r.ok %}<span class="pill ok">ok</span>{% else %}<span class="pill bad">failed</span>{% endif %}
+            </td>
+            <td class="t-sub">{{ r.stats.get('fetched', 0) }} fetched · {{ r.stats.get('new', 0) }} new
+              {% if r.error %}<div class="t-sub" style="color:var(--danger)">{{ r.error[:80] }}</div>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+        <p class="muted" style="margin:0">No syncs yet — press <strong>Sync</strong> to pull this list.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<!-- ------------------------------------------------ skipped -->
+{% if skipped %}
+<section style="margin-top:26px">
+  <h2 style="font-size:18px; margin:0 0 12px">Skipped ({{ skipped | length }})</h2>
+  <div class="hint" style="margin-bottom:12px">
+    These are excluded from ranking and will never be requested.
+  </div>
+  <div class="card"><div class="card-body" style="padding:6px 10px">
+    <table class="tbl">
+      <thead><tr>
+        <th style="width:46px"></th><th>Movie</th><th style="width:150px">Reason</th><th style="width:96px"></th>
+      </tr></thead>
+      <tbody>
+      {% for c in skipped %}
+        <tr>
+          <td>{% if c.poster %}<img src="{{ c.poster }}" style="width:34px;border-radius:5px" loading="lazy">{% endif %}</td>
+          <td><div class="t-title">{{ c.title }}{% if c.year %} <span class="muted">{{ c.year }}</span>{% endif %}</div></td>
+          <td class="t-sub">{{ (c.meta or {}).get('ignore_reason') or 'skipped' }}</td>
+          <td><button class="btn sm ghost" onclick="unignore({{ c.id }})">restore</button></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div></div>
+</section>
+{% endif %}
+
+<!-- ------------------------------------------------ requested -->
+<section style="margin-top:34px">
+  <h2 style="font-size:18px; margin:0 0 12px">Requested to Seerr ({{ added | length }})</h2>
+  {% if added %}
+  <div class="rail-wrap">
+    <button class="rail-nav prev">‹</button>
+    <div class="rail">
+      {% for c in added %}
+      <div class="poster">
+        <div class="art">
+          {% if c.poster %}<img loading="lazy" src="{{ c.poster }}" alt="{{ c.title }}">{% else %}<div class="ph">🎬</div>{% endif %}
+          <div class="added-tag" title="Added to Seerr">✓</div>
+        </div>
+        <div class="cap">
+          <div class="t">{{ c.title }}</div>
+          {% if c.year %}<div class="y">{{ c.year }}{% if c.imdb_rating %} · ★ {{ c.imdb_rating }}{% endif %}</div>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    <button class="rail-nav next">›</button>
+  </div>
+  {% else %}<p class="muted">Nothing requested from this list yet.</p>{% endif %}
+</section>
+
+<!-- ------------------------------------------------ ranked pending -->
+<section style="margin-top:30px">
+  <h2 style="font-size:18px; margin:0 0 6px">Ranked pending ({{ pending | length }})</h2>
+  {% set sc = (pending | map(attribute='score') | list) %}
+  <p class="muted" style="font-size:12.5px; margin:0 0 12px">
+    {{ pending | length }} films, ranked highest score first.
+    {% if sc %}Highest {{ sc | max }}{% endif %}. Scoring is automatic on every sync.
+  </p>
+  {% if pending %}
+  <div class="card">
+    <div class="card-body" style="padding:6px 10px">
+      <table class="tbl">
+        <thead><tr>
+          <th style="width:46px"></th>
+          <th><a class="sort" href="?page=1&amp;per_page={{ pg.per_page }}&amp;sort=title&amp;direction={{ 'asc' if pg.sort == 'title' and pg.direction == 'desc' else 'desc' }}">Movie</a></th>
+          <th style="width:72px"><a class="sort" href="?page=1&amp;per_page={{ pg.per_page }}&amp;sort=score&amp;direction={{ 'asc' if pg.sort == 'score' and pg.direction == 'desc' else 'desc' }}">Score</a></th>
+          <th style="width:88px">Digital</th>
+          <th title="Why this film scored what it scored. Generated by Watchlistarr from the rules that matched. Intake limits appear in Status.">Why</th>
+          <th style="width:150px">Status</th>
+          <th style="width:112px">Actions</th>
+        </tr></thead>
+        <tbody>
+        {% for c in pending %}
+          <tr>
+            <td>{% if c.poster %}<img src="{{ c.poster }}" style="width:34px;border-radius:5px" loading="lazy">{% endif %}</td>
+            <td>
+              <div class="t-title">{{ c.title }}{% if c.year %} <span class="muted">{{ c.year }}</span>{% endif %}</div>
+              <div class="t-sub">
+                {% if c.lb_rating %}<span class="pill accent" style="margin-right:4px" title="Letterboxd community rating">LB {{ c.lb_rating }}</span>{% endif %}
+                {% for g in c.genres[:3] %}<span class="pill" style="margin-right:4px">{{ g }}</span>{% endfor %}
+                {% for k in c.countries[:2] %}<span class="pill" style="margin-right:4px">{{ k }}</span>{% endfor %}
+                {% for l in c.languages[:2] %}<span class="pill">{{ l }}</span>{% endfor %}
+              </div>
+            </td>
+            <td><strong class="num">{{ c.score | round | int }}</strong></td>
+            <td>
+              {% if c.release is none %}
+                <span class="muted">-</span>
+              {% elif c.release.available %}
+                <span class="pill ok" title="{{ c.release.note or 'digital release confirmed' }}">Yes</span>
+              {% else %}
+                <span class="pill warn" title="{{ c.release.note or 'no digital release yet' }}">No</span>
+              {% endif %}
+            </td>
+            <td class="t-sub" title="{{ c.why_summary }}">
+              {# Rendered entirely by app.explain from the scorer breakdown.
+                 No wording is assembled here. #}
+              {% for line in (c.why_lines or [])[:3] %}
+                <div>
+                  <strong style="font-weight:600">{{ line.label }}</strong>:
+                  {{ line.detail }}
+                  {% if line.points %}<span class="pts">{{ line.points }}</span>{% endif %}
+                </div>
+              {% endfor %}
+              {% if (c.why_lines or []) | length > 3 %}
+                <div class="muted" title="{{ c.why_summary }}">
+                  +{{ (c.why_lines | length) - 3 }} more — hover for the full breakdown
+                </div>
+              {% endif %}
+            </td>
+            <td>
+              {# Only two states matter to the operator: is it still pending, or is
+                 it parked because it has no digital release yet ("cached").
+                 Intake-gate reasons (Pace, already in Radarr) are intentionally
+                 NOT shown here -- they are automatic-intake behaviour, not the
+                 film's state. #}
+              {% if c.status == 'requested' %}<span class="pill ok">requested</span>
+              {% elif c.status == 'error' %}<span class="pill bad">error</span>
+              {% elif c.blocked_by and c.blocked_by == 'not_released' %}<span class="pill warn" title="No digital release yet -- will be requested automatically once it ships">cached</span>
+              {% else %}<span class="pill">pending</span>{% endif %}
+            </td>
+            <td style="white-space:nowrap">
+              <button class="btn sm primary" onclick="requestOne({{ c.id }}, this)"
+                      title="Request this film in Seerr now, ignoring Pace and the Radarr guard">Request</button>
+              <button class="btn sm ghost" onclick="ignore({{ c.id }})">skip</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {# Real pagination: 800+ rows no longer render all at once. #}
+    <div class="pager">
+      <span class="muted">
+        Showing {{ pg.from }}-{{ pg.to }} of {{ pg.total }}
+        {%- if pg.total != pg.per_page * pg.pages %} ({{ pg.per_page }} per page){% endif %}
+      </span>
+      <span class="spacer"></span>
+      <label class="muted">Per page
+        <select class="sel" onchange="location.search='?page=1&amp;per_page='+this.value+'&amp;sort={{ pg.sort }}&amp;direction={{ pg.direction }}'">
+          {% for n in [25, 50, 100, 200] %}
+            <option value="{{ n }}" {% if n == pg.per_page %}selected{% endif %}>{{ n }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <span class="spacer"></span>
+      {% if pg.page > 1 %}
+        <a class="btn sm" href="?page=1&amp;per_page={{ pg.per_page }}&amp;sort={{ pg.sort }}&amp;direction={{ pg.direction }}">First</a>
+        <a class="btn sm" href="?page={{ pg.page - 1 }}&amp;per_page={{ pg.per_page }}&amp;sort={{ pg.sort }}&amp;direction={{ pg.direction }}">Prev</a>
+      {% endif %}
+      <span class="muted">Page {{ pg.page }} of {{ pg.pages }}</span>
+      {% if pg.page < pg.pages %}
+        <a class="btn sm" href="?page={{ pg.page + 1 }}&amp;per_page={{ pg.per_page }}&amp;sort={{ pg.sort }}&amp;direction={{ pg.direction }}">Next</a>
+        <a class="btn sm" href="?page={{ pg.pages }}&amp;per_page={{ pg.per_page }}&amp;sort={{ pg.sort }}&amp;direction={{ pg.direction }}">Last</a>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+    <div class="empty"><h3>Nothing pending</h3><p>Sync the list to pull in movies.</p></div>
+  {% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const WL = {{ wl | tojson }};
+const PRESETS = {{ catalogue.presets | tojson }};
+
+// render existing rules
+const list = document.getElementById('ruleList');
+function addRule(rule) {
+  const tmp = document.createElement('div');
+  tmp.innerHTML = ruleRow(rule);
+  const row = tmp.firstElementChild;
+  list.appendChild(row);
+  // Bind the picker's listeners. Without this the button renders but does
+  // nothing -- the dropdown "does not open".
+  initAllPickers(row);
+  return row;
+}
+(WL.config.rules || []).forEach(r => addRule(r));
+// Preset / kind-change rows are added dynamically; make sure anything already
+// on the page is wired too.
+initAllPickers(document);
+bindRuleEditor(document.getElementById('ruleBox'));
+
+function applyPreset(id) {
+  const p = PRESETS.find(x => x.id === id);
+  if (!p) return;
+  list.innerHTML = '';
+  p.rules.forEach(r => addRule(r));
+  toast('Preset loaded — remember to Save rules.', 'ok');
+}
+
+async function saveRules() {
+  const btn = document.getElementById('saveRules');
+  const box = document.getElementById('ruleBox');
+  const rules = box._readRules ? box._readRules() : [];
+  const qc = document.getElementById('quotaCount').value.trim();
+  const config = {
+    ...WL.config,
+    rules,
+    quota_count: qc === '' ? null : Number(qc),
+    quota_window: document.getElementById('quotaWindow').value,
+    max_per_run: Number(document.getElementById('maxPerRun').value || 0),
+    quality_profile: document.getElementById('qualityProfile').value.trim() || null,
+    root_folder: document.getElementById('rootFolder').value.trim() || null,
+    tags: document.getElementById('tags').value.split(',').map(s => s.trim()).filter(Boolean),
+  };
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Saving';
+  try {
+    await api('/api/watchlists/' + WL.id, { method: 'PATCH', body: { config } });
+    toast('Rules saved.', 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+  btn.disabled = false; btn.textContent = 'Save rules';
+}
+
+async function saveSource() {
+  const btn = document.getElementById('saveSource');
+  const hint = document.getElementById('sourceHint');
+  const url = document.getElementById('editUrl').value.trim();
+  const maxItems = document.getElementById('editMaxItems').value.trim();
+  const ref = {};
+  if (url) ref.list_url = url;
+  if (maxItems && Number(maxItems) > 0) ref.max_items = Number(maxItems);
+
+  if (!url) { hint.textContent = 'Enter a URL (or a username + slug).'; return; }
+
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Saving';
+  try {
+    await api('/api/watchlists/' + WL.id, {
+      method: 'PATCH',
+      body: { name: document.getElementById('editName').value.trim() || WL.name, source_ref: ref },
+    });
+    hint.innerHTML = '<span style="color:var(--ok)">Saved — hit Sync to pull the new list.</span>';
+    toast('Source updated.', 'ok');
+    setTimeout(() => location.reload(), 800);
+  } catch (e) {
+    hint.innerHTML = '<span style="color:var(--danger)">' + esc(e.message) + '</span>';
+    toast(e.message, 'bad');
+  }
+  btn.disabled = false; btn.textContent = 'Save source';
+}
+
+async function toggleEnabled() {
+  await api('/api/watchlists/' + WL.id, { method: 'PATCH', body: { enabled: !WL.enabled } });
+  location.reload();
+}
+async function removeWatchlist() {
+  if (!confirm('Delete this watchlist and all its tracked movies?')) return;
+  await api('/api/watchlists/' + WL.id, { method: 'DELETE' });
+  location.href = '/';
+}
+async function unignore(id) {
+  try { await api('/api/candidates/' + id + '/unignore', { method: 'POST' }); }
+  catch (e) { toast(e.message, 'bad'); return; }
+  location.reload();
+}
+async function ignore(id) {
+  try { await api('/api/candidates/' + id + '/ignore', { method: 'POST', body: { reason: 'skipped from UI' } }); }
+  catch (e) { toast(e.message, 'bad'); return; }
+  location.reload();
+}
+
+async function doSync(btn) {
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Syncing';
+  try {
+    const r = await api('/api/watchlists/' + WL.id + '/sync', { method: 'POST' });
+    if (!r.ok) { toast('Sync failed: ' + r.error, 'bad'); btn.disabled = false; btn.textContent = 'Sync'; return; }
+    toast(`Fetched ${r.fetched} · ${r.new} new · ${r.updated} updated`, 'ok');
+    await doScore(btn);
+    setTimeout(() => location.reload(), 900);
+  } catch (e) {
+    toast(e.message, 'bad'); btn.disabled = false; btn.textContent = 'Sync';
+  }
+}
+async function requestOne(id, btn) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '...';
+  try {
+    const r = await api('/api/candidates/' + id + '/request', { method: 'POST' });
+    if (r.ok === false) { toast(r.error || 'Could not request', 'bad'); btn.disabled = false; btn.textContent = label; return; }
+    toast('Requested: ' + (r.title || ''), 'ok');
+    const tr = btn.closest('tr');
+    const status = tr ? tr.querySelector('td:nth-child(6)') : null;
+    if (status) status.innerHTML = '<span class="pill ok">requested</span>';
+    btn.textContent = 'requested'; btn.disabled = true;
+  } catch (e) {
+    toast('Request failed: ' + e.message, 'bad');
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
+async function doScore(btn) {
+  try {
+    const r = await api('/api/watchlists/' + WL.id + '/score', { method: 'POST' });
+    toast(`Scored ${r.scored} candidates.`, 'ok');
+  } catch (e) { toast(e.message, 'bad'); }
+}
+async function doRequest(btn) {
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Requesting';
+  try {
+    // request-next = manual override; bypasses the Pace valve by design.
+    const r = await api('/api/watchlists/' + WL.id + '/request-next', { method: 'POST' });
+    if (r.ok === false) { toast(r.error || 'Could not request', 'bad'); btn.disabled = false; btn.textContent = 'Request next'; return; }
+    toast(`Requested ${r.requested} · skipped ${r.skipped || 0} · rejected ${r.rejected} · errors ${r.errors}`, 'ok');
+    setTimeout(() => location.reload(), 1100);
+  } catch (e) {
+    toast(e.message, 'bad'); btn.disabled = false; btn.textContent = 'Request next';
+  }
+}
+</script>
+{% endblock %}
