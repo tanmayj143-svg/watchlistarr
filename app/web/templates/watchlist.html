@@ -17,7 +17,7 @@
   </div>
   <div class="page-actions">
     <button class="btn" onclick="doSync(this)">Sync now</button>
-    <button class="btn primary" onclick="doRequest(this)" title="Requests the highest-scored film, ignoring the Pace limit. Scores are not changed.">Request next</button>
+    <button class="btn primary" onclick="doRequest(this)" title="Requests the highest-scored film, ignoring the frequency limit. Scores are not changed.">Request next</button>
   </div>
 </div>
 
@@ -110,17 +110,19 @@
         <button class="btn sm" onclick="addRule({kind:'max_free_gb',comparator:'lte',threshold:500,threshold2:4,limit:true,points:0})">+ Max free GB</button>
       </div>
 
-      <h3 style="font-size:15px; margin:20px 0 4px">Pace</h3>
+      <h3 style="font-size:15px; margin:20px 0 4px">Frequency</h3>
       <p class="muted" style="font-size:12.5px; margin:0 0 12px; line-height:1.5">
-        Simple X movies per Y time. This is a hard cap: once the limit is reached
-        nothing is requested until the period rolls over.
+        How often a request goes out. N movies per Y is an <strong>even spread</strong>,
+        not a burst: N per month means one request every (30 &divide; N) days —
+        the next slot opens that long after the last request. Manual
+        <strong>Request next</strong> ignores this.
       </p>
       <div class="row">
         <label class="fld">
-          <span>X — max films</span>
+          <span>N — movies per period</span>
           <input type="number" id="quotaCount" min="0" step="1"
                  value="{{ wl.config.get('quota_count') or '' }}" placeholder="e.g. 4">
-          <div class="help">Blank = no cap.</div>
+          <div class="help">Blank = no limit. 4 per month ≈ one every 7.5 days.</div>
         </label>
         <label class="fld">
           <span>per Y — period</span>
@@ -308,7 +310,7 @@
             </td>
             <td style="white-space:nowrap">
               <button class="btn sm primary" onclick="requestOne({{ c.id }}, this)"
-                      title="Request this film in Seerr now, ignoring Pace and the Radarr guard">Request</button>
+                      title="Request this film in Seerr now, ignoring the frequency limit and the Radarr guard">Request</button>
               <button class="btn sm ghost" onclick="ignore({{ c.id }})">skip</button>
             </td>
           </tr>

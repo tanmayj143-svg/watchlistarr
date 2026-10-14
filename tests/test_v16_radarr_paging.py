@@ -235,9 +235,9 @@ _db.insert(
 )
 
 _real_guards = _eng._global_storage_guards
-# ceiling 250 GB with 500 GB free -> ceiling blocks; minimum 50 GB also passes
+# ceiling 600 GB with 500 GB free -> ceiling blocks; minimum 50 GB passes
 _eng._global_storage_guards = lambda cap: {
-    "min_free_gb": 50.0, "max_free_gb": 250.0, "est_movie_gb": None,
+    "min_free_gb": 50.0, "max_free_gb": 600.0, "est_movie_gb": None,
 }
 _real_counts = _eng._window_counts
 _eng._window_counts = lambda wl_id, now=None: {

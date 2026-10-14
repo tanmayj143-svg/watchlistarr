@@ -40,7 +40,8 @@ db.execute("DELETE FROM watchlists")
 db.execute(
     "INSERT INTO watchlists (id, name, source_type, source_ref, config, enabled, sort_order, created_at, updated_at) "
     "VALUES (101, 'Test Watchlist', 'letterboxd', '{}', "
-    "'{\"enabled\": true, \"quota_count\": 2, \"quota_window\": \"day\", \"max_per_run\": 5}', 1, 1, ?, ?)",
+    "'{\"enabled\": true, \"quota_count\": 2, \"quota_window\": \"day\", \"max_per_run\": 5, "
+    "\"rules\": [{\"id\": \"yr\", \"kind\": \"decade\", \"op\": \"in\", \"value\": [2020], \"points\": 10}]}', 1, 1, ?, ?)",
     (db.now(), db.now())
 )
 db.execute(
@@ -53,6 +54,9 @@ db.execute(
     "VALUES (2, 101, 'k2', 'Movie B', 'discovered', 9.0, '102', '2020-01-01', 2020, ?, ?)",
     (db.now(), db.now())
 )
+# v1.7.0: automatic requests require score > 0, so the fixtures carry a decade
+# rule that matches their year -- previously a 0-score film still went out,
+# which is exactly the filler behaviour this invariant exists to prevent.
 
 row = db.one("SELECT * FROM watchlists WHERE id=101")
 assert row is not None

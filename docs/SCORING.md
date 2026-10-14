@@ -50,7 +50,20 @@ Two rules are not scorers: **limits** (see below) either pass or block.
 A limit that matches **rejects the movie**, regardless of score. Use these for
 "only this many per period" and "not when the disk is full".
 
-### Quota — "X per Y time"
+### Frequency — "X per Y" as an even-spread rate (v1.7.2)
+
+The window is divided into X equal slots. A request goes out when the previous
+request within the current window is at least one slot old; once all X slots
+are spent, it waits for the next window. 4 per month = one every 7.5 days;
+2 per week = one every 3.5 days; 1 per day = every day.
+
+{"id":"cap","kind":"frequency","window":"month","threshold":4,
+ "limit":true,"points":0}
+
+The scorer reads the per-window most-recent-request timestamp
+(`_window_last_requested_at`, supplied by the engine) to decide whether the
+next slot has opened. The film's score is never touched by this rule — it
+only decides whether a request can go out now.
 
 ```json
 {"id":"cap","kind":"quota","window":"month","threshold":4,

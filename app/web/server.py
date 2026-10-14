@@ -105,7 +105,7 @@ def _interval(key: str, default_minutes: int) -> int:
 
 
 def _should_retry_unmet_pace() -> bool:
-    """Check if any enabled watchlist has an unmet pace quota and pending candidates."""
+    """Check if any enabled watchlist has an unmet frequency quota and pending candidates."""
     try:
         from datetime import datetime, timezone
         from .. import db
@@ -135,7 +135,7 @@ def _should_retry_unmet_pace() -> bool:
                 if pending:
                     return True
     except Exception as exc:
-        log.warning("unmet pace check failed: %s", exc)
+        log.warning("unmet frequency check failed: %s", exc)
     return False
 
 
@@ -197,7 +197,7 @@ def _scheduler_loop() -> None:
     sched.start()
 
     # Re-apply the intervals periodically so a Settings change is picked up
-    # within ~5 minutes, and check if an unmet pace needs an automatic retry pass.
+    # within ~5 minutes, and check if an unmet frequency needs an automatic retry pass.
     last_unmet_retry = 0.0
     while not _shutdown_scheduler.wait(timeout=300):
         try:
@@ -207,7 +207,7 @@ def _scheduler_loop() -> None:
             if now_ts - last_unmet_retry >= 900:  # 15 minutes minimum interval between retries
                 if _should_retry_unmet_pace():
                     last_unmet_retry = now_ts
-                    log.info("Automatic pace check: unmet pace detected with pending candidates; running request cycle")
+                    log.info("Automatic pace check: unmet frequency detected with pending candidates; running request cycle")
                     engine.run_cycle(sync=False, request=True)
         except Exception as exc:
             log.warning("scheduler reschedule failed: %s", exc)
@@ -731,7 +731,7 @@ def api_score(wl_id: int, user: str = Depends(require_user)):
 
 @app.post("/api/watchlists/{wl_id}/request")
 def api_request(wl_id: int, user: str = Depends(require_user)):
-    """Scheduled/automatic request -- respects the Pace valve."""
+    """Scheduled/automatic request -- respects the frequency limit."""
     wl = wl_svc.get_watchlist(wl_id)
     if wl is None:
         return _err("No such watchlist", 404)
@@ -762,7 +762,7 @@ def api_request_next(wl_id: int, user: str = Depends(require_user)):
 def api_request_candidate(candidate_id: int, user: str = Depends(require_user)):
     """Request one specific film -- backs the per-row Request button.
 
-    Bypasses Pace, the Radarr-exists guard and the digital-release gate, because
+    Bypasses the frequency limit, the Radarr-exists guard and the digital-release gate, because
     the operator picked this film deliberately. A skipped film stays skipped.
     """
     return engine.request_single_candidate(candidate_id)

@@ -204,12 +204,16 @@ finally:
     P._client = _orig
 check("unrelated results are rejected", bad is None, str(bad))
 
-print("\n12. Country->language guess is flagged")
-check("guess helper exists", callable(P._language_from_countries))
-check("guess for India is Hindi", P._language_from_countries(["India"]) == "Hindi",
-      str(P._language_from_countries(["India"])))
-check("guess for unknown country is None",
-      P._language_from_countries(["Atlantis"]) is None)
+print("\n12. Country->language guess is REMOVED (v1.7.0: TMDB-only, no guesses)")
+# The country-derived language heuristic was deleted with the Cinemeta-era
+# fallbacks. Language now comes only from TMDB's original_language /
+# spoken_languages fields.
+check("guess helper is gone",
+      not hasattr(P, "_language_from_countries"),
+      "removed by design")
+check("guess table is gone",
+      not hasattr(P, "_COUNTRY_DEFAULT_LANGUAGE"),
+      "removed by design")
 
 
 print("\n13. Canonical duplicates are collapsed, not double-counted")

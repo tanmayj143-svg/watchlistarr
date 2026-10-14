@@ -25,7 +25,7 @@ RULE_LABELS = {
     "popularity": "Popularity",
     "runtime": "Runtime",
     "source_position": "Watchlist position",
-    "pace": "Pace limit",
+    "pace": "Frequency limit",
     "capacity": "Library capacity",
     "min_free_gb": "Minimum free disk",
     "max_free_gb": "Maximum free disk",

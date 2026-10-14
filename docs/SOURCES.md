@@ -44,68 +44,39 @@ pages, which serve fine (`HTTP 200`, ~262 KB for a 100-item page).
 
 ---
 
-## Cinemeta — metadata, keyless
+## TMDB — the single metadata source (v1.7.0)
 
-`https://v3-cinemeta.strem.io` — the public Stremio metadata service. No key, no
-account, no rate-limit complaints observed.
+**Status: required.** Since v1.7.0 (operator decision, 2026-10-14) every metadata
+field — title, year, IMDb/TMDB ids, genres, countries, languages, rating,
+runtime, release date, poster — comes from exactly one provider: TMDB.
 
-- `GET /meta/movie/tt<imdb_id>.json` → genre, country, director, runtime,
-  rating, IMDb id, TMDB id, description, poster
-- `GET /catalog/movie/top/search=<title>.json` → title search
+> **History:** v1.6.5 and earlier layered Cinemeta + Wikidata + an IMDb
+> suggestion fallback on top of TMDB. In v1.6.5 the keyless path was
+> accidentally amputated (`resolve()` returned None without a TMDB key even
+> though all the Cinemeta code still shipped), so enrichment silently produced
+> blank rows. v1.7.0 made the standardisation honest: the dead providers were
+> deleted outright and TMDB became the documented, required source.
 
-**Verified** on "Farewell My Concubine": genres `['Drama','Music','Romance']`,
-countries `['China','Hong Kong','South Korea']`, IMDb `tt0106332`, TMDB `10997`.
+Endpoints used:
 
-### Known gap
+- `GET /3/search/movie?query=<title>&year=<year>` — fuzzy title search, validated
+  against the requested title (the search itself can return unrelated films; a
+  "Kaul" search once surfaced *The Bone Collector*, so a plausibility check plus
+  exact-year matching runs before anything is stored).
+- `GET /3/movie/<id>?append_to_response=release_dates` — the authoritative
+  details record. `/search/movie` returns only numeric `genre_ids`; the names
+  live here.
+- `GET /3/find?external_id=<imdb_id>&external_source=imdb_id` — IMDb-id → TMDB.
 
-`language` is usually **absent**. Watchlistarr fills it from Wikidata, then falls
-back to a country heuristic. See below.
+Country names are normalised at the ingestion boundary ("United States of
+America" → "United States") so saved rules match.
 
-Posters are requested at `medium` size by rewriting `/small/` in the returned URL.
+### Key
 
----
-
-## Wikidata — language backfill, keyless
-
-`https://www.wikidata.org/w/api.php` (`wbsearchentities` + `wbgetentities`).
-
-Needed because Cinemeta leaves language blank, and language sliders would
-otherwise match nothing. Properties read:
-
-| Property | Meaning |
-|---|---|
-| `P345` | IMDb id (used to confirm the right entity) |
-| `P364` | original language |
-| `P495` | country of origin |
-| `P136` | genre |
-
-**Verified**: "Farewell My Concubine" → `Q696413`, `P364` → `Q24841726`
-("Putonghua" → normalised to **Mandarin**), `P495` → `Q148` ("People's Republic of
-China" → normalised to **China**).
-
-Those normalisations matter: without them a country slider set to "China" would
-never match Wikidata's longer label.
-
-### Rate limiting — the main operational caveat
-
-Wikidata aggressively throttles anonymous callers. During development this IP
-received sustained `HTTP 429 Too Many Requests`.
-
-Mitigations in place:
-
-- every call passes through a **slot-based throttle** (3 slots, 0.6 s apart)
-- failures **retry once**, then give up fast rather than stalling a sync
-- results are cached, so repeat lookups cost nothing
-
-### When Wikidata is unavailable
-
-`resolve()` falls back to a **country → dominant language** heuristic
-(`COUNTRY_LANGUAGE`), and flags the row as guessed. Verified by simulating a
-total outage: all five test films still resolved a language, so language sliders
-keep working.
-
-The heuristic is conservative — only countries with one dominant language — and
-only applies when both Cinemeta *and* Wikidata are silent.
+A free API key (themoviedb.org → Settings → API) is REQUIRED. Without one
+`resolve()` returns None, rows are stored unresolved, and later syncs retry
+them. The backfill endpoint reports the missing key explicitly instead of
+attempting hundreds of doomed lookups.
 
 ---
 
@@ -133,11 +104,10 @@ https://v3.sg.media-imdb.com/suggestion/x/<title>.json
 
 ---
 
-## Optional: TMDB
+## Optional: IMDb suggestion API
 
-Only used if you paste a free API key into Settings. TMDB is more precise on
-country-of-origin and language, so it improves match quality — but Watchlistarr
-is fully functional without it.
+**Removed in v1.7.0.** The keyless id-resolution path was deleted together with
+Cinemeta; TMDB lookup by IMDb id covers the same need.
 
 ---
 
@@ -146,10 +116,7 @@ is fully functional without it.
 | Source | Login? | Paid? | Role |
 |---|---|---|---|
 | Letterboxd | no | no | primary movie source |
-| Cinemeta | no | no | genre, country, year, rating, ids |
-| Wikidata | no | no | language, country refinement |
-| IMDb suggestion | no | no | id/title resolution |
+| TMDB | no | no (free key) | **the** metadata source (required) |
 | IMDb Lists | no | no | optional source, often blocked |
-| TMDB | no | no | optional accuracy boost |
 | Seerr | n/a | n/a | receives requests (needs your key) |
 | Radarr | n/a | n/a | optional capacity rules (needs your key) |

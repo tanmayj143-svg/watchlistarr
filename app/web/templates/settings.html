@@ -18,10 +18,12 @@
     <div class="card-head"><h2>Integrations</h2></div>
     <div class="card-body">
       <div class="hint" style="margin-bottom:18px">
-        Watchlistarr needs <strong>Seerr</strong> to send requests.
-        <strong>Radarr</strong> is optional but unlocks disk-space and
-        library-count rules. Both accept an API key from
-        <span class="mono">Settings → General</span> in your Seerr/Radarr.
+        Watchlistarr needs <strong>Seerr</strong> to send requests,
+        a free <strong>TMDB API key</strong> to read metadata (v1.7.0: TMDB is
+        the only metadata source), and — optionally — <strong>Radarr</strong>,
+        which unlocks disk-space and library-count rules. Keys come from
+        <span class="mono">Settings → General</span> in your Seerr/Radarr and
+        from <span class="mono">themoviedb.org</span> (free account).
       </div>
 
       <label class="fld"><span>Seerr URL</span>
@@ -45,9 +47,9 @@
 
       <div style="height:22px"></div>
 
-      <label class="fld"><span>TMDB API key <em class="muted" style="font-weight:400">(optional)</em></span>
-        <input type="password" id="tmdb_api_key" value="{{ integrations.tmdb_api_key or '' }}" placeholder="free key improves country/language data">
-        <div class="help">Entirely optional — Watchlistarr works keyless by default.</div>
+      <label class="fld"><span>TMDB API key <em class="muted" style="font-weight:400">(required — free)</em></span>
+        <input type="password" id="tmdb_api_key" value="{{ integrations.tmdb_api_key or '' }}" placeholder="paste TMDB API key">
+        <div class="help">Metadata (genres, countries, languages, ids, release dates) comes from TMDB only. Without this key films cannot be enriched. Get a free key at themoviedb.org → Settings → API.</div>
       </label>
 
       <label class="switch" style="margin:18px 0">
@@ -188,14 +190,9 @@
           <td class="t-sub">Lists and member watchlists, keyless and reliable. RSS is Cloudflare-blocked, so the HTML pages are parsed instead.</td>
         </tr>
         <tr>
-          <td><strong>Cinemeta</strong></td>
-          <td><span class="pill ok">keyless</span></td>
-          <td class="t-sub">Metadata: genre, country, year, ratings, IMDb/TMDB ids.</td>
-        </tr>
-        <tr>
-          <td><strong>Wikidata</strong></td>
-          <td><span class="pill ok">keyless</span></td>
-          <td class="t-sub">Fills in language (and refines country) where Cinemeta is blank.</td>
+          <td><strong>TMDB</strong></td>
+          <td><span class="pill warn">required</span></td>
+          <td class="t-sub">The single metadata source (v1.7.0): genres, countries, languages, ids, ratings, release dates. Free API key from themoviedb.org.</td>
         </tr>
         <tr>
           <td><strong>IMDb Lists</strong></td>

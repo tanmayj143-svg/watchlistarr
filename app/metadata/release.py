@@ -6,13 +6,11 @@ re-checked on every sync, so it becomes eligible the moment it ships.
 
 Where the data comes from
 -------------------------
-* **With a TMDB key** (free, optional): `release_dates` is authoritative. It
-  reports every release type, and `type 4` is *digital*. This is the accurate
-  path and is used automatically when a key is configured.
-* **Without a key**: no free source exposes digital-release dates — Cinemeta
-  (verified during v1.3.0 development) carries only a single `released` date,
-  which is the theatrical one. The fallback therefore applies a conservative
-  heuristic and says so in the log, rather than pretending to know.
+* **With a TMDB key** (free, required since v1.7.0): `release_dates` is
+  authoritative. It reports every release type, and `type 4` is *digital*.
+* **Without a key** (misconfiguration since v1.7.0): no fallback metadata
+  provider exists any more, so the release-date heuristic applies — a future
+  date, or a current-year film with no date, is held back.
 
 Heuristic (keyless)
 -------------------

@@ -30,8 +30,8 @@ from .timewin import resolve_window
 
 log = logging.getLogger("watchlistarr.engine")
 
-# Concurrent metadata lookups. Sources are public and rate-limit tolerant; 8
-# keeps a 25-item sync in seconds without hammering Cinemeta/Wikidata.
+# Concurrent metadata lookups. TMDB rate-limits politely; 8 workers keeps a
+# 25-item sync in seconds without hammering the API.
 ENRICH_WORKERS = 8
 
 STATUS_PENDING = "pending"
@@ -99,6 +99,14 @@ def sync_watchlist(wl: dict[str, Any], *, enrich_limit: int = 400) -> dict[str, 
         if i.source_key not in existing
         or db.loads(existing[i.source_key]["meta"], {}).get("unresolved")
     ]
+    # v1.7.0: unresolved rows first, then new rows -- so a later sync spends its
+    # budget rescuing blank rows before enriching fresh ones, and the
+    # oldest gaps drain instead of being starved by each sync's new arrivals.
+    pending_new.sort(
+        key=lambda it: 0
+        if (it.source_key in existing)  # existing unresolved row = oldest debt
+        else 1
+    )
     enrichment: dict[str, Any] = {}
     if pending_new and enrich_limit > 0:
         budget = pending_new[:enrich_limit]
@@ -241,12 +249,15 @@ def sync_watchlist(wl: dict[str, Any], *, enrich_limit: int = 400) -> dict[str, 
         log.warning("auto-score failed for %s: %s", wl.get("name"), exc)
 
     # Letterboxd ratings for newly discovered films, same reasoning: the
-    # operator wants ratings available without pressing anything. Bounded so a
-    # first sync of 800 films cannot spend forever on it.
+    # operator wants ratings available without pressing anything. Bounded per
+    # sync (v1.7.0: 150, up from 60, so a multi-hundred-film import catches up
+    # in a handful of cycles instead of taking days) and idempotent -- cached
+    # slugs are skipped, so the backlog drains across consecutive syncs.
     if new_items:
         try:
             got = backfill_letterboxd_ratings(
-                wl["id"], limit=min(60, len(new_items)), slugs=[i.slug for i in new_items if i.slug]
+                wl["id"], limit=min(150, len(new_items)),
+                slugs=[i.slug for i in new_items if i.slug],
             )
             stats["lb_ratings"] = got.get("stored", 0)
         except Exception as exc:
@@ -314,8 +325,8 @@ def _apply_storage_guards(guards: dict[str, float], cap: Any) -> str | None:
         return f"storage floor: only {free:.1f} GB free, needs {min_free:g} GB"
 
     max_free = guards.get("max_free_gb")
-    if max_free is not None and free > max_free:
-        return f"storage ceiling: {free:.1f} GB free is above the {max_free:g} GB ceiling, topping up paused"
+    if max_free is not None and free < max_free:
+        return f"storage ceiling: only {free:.1f} GB free is below the {max_free:g} GB ceiling, topping up paused"
     return None
 
 
@@ -335,6 +346,32 @@ def _window_counts(watchlist_id: int, now: datetime) -> dict[str, int]:
     for name in ("day", "week", "month", "quarter", "year"):
         w = resolve_window(name, now)
         out[name] = sum(1 for s in stamps if w.contains(s))
+    return out
+
+
+def _window_last_requested(watchlist_id: int, now: datetime) -> dict[str, str | None]:
+    """Most recent request timestamp per named window (frequency slots).
+
+    v1.7.2: the frequency mechanic spreads N-per-window evenly, so the scorer
+    needs to know when the last request inside the current window happened —
+    the next slot opens window_length/N after that. Per-window because the
+    last request may fall outside the current window (then it's window start).
+    """
+    out: dict[str, str | None] = {}
+    rows = db.query(
+        "SELECT requested_at FROM candidates WHERE watchlist_id=? AND requested_at IS NOT NULL",
+        (watchlist_id,),
+    )
+    stamps = []
+    for r in rows:
+        try:
+            stamps.append(datetime.fromisoformat(r["requested_at"]).astimezone(timezone.utc))
+        except (TypeError, ValueError):
+            continue
+    for name in ("day", "week", "month", "quarter", "year"):
+        w = resolve_window(name, now)
+        inside = [s for s in stamps if w.contains(s)]
+        out[name] = max(inside).isoformat(timespec="seconds") if inside else None
     return out
 
 
@@ -392,6 +429,9 @@ def evaluate_watchlist(
         rules = [r for r in rules if not r.limit or r.kind != "pace"]
 
     counts = _window_counts(wl["id"], now)
+    # v1.7.2: per-window most-recent-request timestamps drive the frequency
+    # slots (one request every window_length/N).
+    last_req = _window_last_requested(wl["id"], now)
     scorer = Scorer(rules, capacity=cap)
 
     rows = db.query(
@@ -414,6 +454,8 @@ def evaluate_watchlist(
         payload = _candidate_payload(row, counts)
         # Each candidate sees the live count for every window it references.
         payload["_window_counts"] = counts
+        # v1.7.2: frequency slots read the per-window last-request time.
+        payload["_window_last_requested_at"] = last_req
 
         # Gates decide ELIGIBILITY only. The score always comes from the rules,
         # so ranking stays meaningful while a film sits on hold. `gate` is the
@@ -516,8 +558,19 @@ def evaluate_watchlist(
     return out
 
 
-def refresh_scores(wl: dict[str, Any], cap: RadarrCapacity | None = None) -> int:
-    """Persist current scores so the UI can sort before any request happens."""
+def refresh_scores(
+    wl: dict[str, Any],
+    cap: RadarrCapacity | None = None,
+    *,
+    return_items: bool = False,
+) -> int | list[dict[str, Any]]:
+    """Persist current scores so the UI can sort before any request happens.
+
+    With `return_items=True` the evaluated (already scored, already decorated
+    with release verdicts) list is returned instead of a count, so callers that
+    immediately request can reuse it instead of re-running the full
+    evaluate_watchlist pass a second time in the same cycle (v1.7.0).
+    """
     cap = cap if cap is not None else capacity_snapshot()
     evaluated = evaluate_watchlist(wl, cap)
 
@@ -575,7 +628,110 @@ def refresh_scores(wl: dict[str, Any], cap: RadarrCapacity | None = None) -> int
                 item["id"],
             ),
         )
-    return len(evaluated)
+    return evaluated if return_items else len(evaluated)
+
+
+def request_for_watchlist_from_items(
+    wl: dict[str, Any],
+    evaluated: list[dict[str, Any]],
+    cap: RadarrCapacity | None = None,
+    *,
+    manual: bool = False,
+) -> dict[str, Any]:
+    """Request the top N eligible candidates from a PRE-EVALUATED list.
+
+    Same contract as `request_for_watchlist` but skips the second full
+    evaluate_watchlist pass. `evaluated` must come from `refresh_scores(...,
+    return_items=True)` for the same watchlist in this cycle.
+    """
+    stats = {"considered": 0, "requested": 0, "already": 0, "errors": 0, "rejected": 0}
+    cfg = wl.get("config", {}) or {}
+
+    if not _integration("requests_enabled", True):
+        return {**stats, "ok": False, "error": "Requests are disabled in Settings."}
+
+    max_per_run = int(cfg.get("max_per_run") or 1)
+    if manual:
+        max_per_run = 1
+    elif max_per_run <= 0:
+        return {**stats, "ok": True}
+
+    root_folder = cfg.get("root_folder") or None
+    quality_profile = cfg.get("quality_profile") or None
+    tags = [t for t in (cfg.get("tags") or []) if t]
+    search_on_add = cfg.get("search_on_add")
+
+    seerr_url = _integration("seerr_url", settings.seerr_url)
+    seerr_key = _integration("seerr_api_key", settings.seerr_api_key)
+    if not seerr_url or not seerr_key:
+        return {**stats, "ok": False, "error": "Seerr is not configured — add it in Settings."}
+
+    try:
+        client = SeerrClient(seerr_url, seerr_key, settings.http_timeout)
+    except Exception as exc:
+        return {**stats, "ok": False, "error": str(exc)}
+
+    sent = 0
+    for item in evaluated:
+        stats["considered"] += 1
+        if not item["eligible"]:
+            stats["rejected"] += 1
+            continue
+        # v1.7.0: never auto-request a zero-score filler film (see the
+        # matching comment in request_for_watchlist).
+        if not manual and float(item.get("score") or 0) <= 0:
+            break
+        if sent >= max_per_run:
+            break
+        if item["status"] == STATUS_REQUESTED:
+            continue
+        if not item.get("tmdb_id") and not item.get("imdb_id"):
+            stats["errors"] += 1
+            _add_event(item["id"], "skip", {"reason": "no tmdb/imdb id"})
+            continue
+        result = client.create_request(
+            tmdb_id=item.get("tmdb_id"),
+            title=item.get("title") or "",
+            imdb_id=item.get("imdb_id"),
+            root_folder=root_folder,
+            quality_profile=quality_profile,
+            tags=tags,
+            search_on_add=search_on_add,
+        )
+        _add_event(
+            item["id"],
+            "requested" if result.ok else "error",
+            {"detail": result.detail, "seerr_state": result.status, "score": item["score"]},
+        )
+        if result.ok:
+            db.execute(
+                "UPDATE candidates SET status=?, requested_at=?, seerr_request_id=?, "
+                "seerr_state=?, updated_at=? WHERE id=?",
+                (
+                    STATUS_REQUESTED, db.now(), result.request_id,
+                    result.status, db.now(), item["id"],
+                ),
+            )
+            sent += 1
+            stats["requested" if not result.already else "already"] += 1
+        else:
+            is_net_err = isinstance(result.detail, str) and result.detail.startswith("Network error")
+            if is_net_err:
+                log.warning(
+                    "Seerr network error for %s: %s. Halting batch to preserve pending items.",
+                    item.get("title"),
+                    result.detail,
+                )
+                stats["errors"] += 1
+                return {**stats, "ok": False, "error": result.detail}
+            db.execute(
+                "UPDATE candidates SET status=?, last_reason=?, updated_at=? WHERE id=?",
+                (STATUS_ERROR, result.detail, db.now(), item["id"]),
+            )
+            stats["errors"] += 1
+
+    log.info("request cycle for %s: %s", wl.get("name"), stats)
+    return {**stats, "ok": True}
 
 
 def request_for_watchlist(
@@ -626,6 +782,15 @@ def request_for_watchlist(
         if not item["eligible"]:
             stats["rejected"] += 1
             continue
+        # v1.7.0 (restores the v1.3.1 invariant): an automatic request must go
+        # to a film the rules actually WANT. A 0-score film matched no rule and
+        # is only "top of the list" because nothing better exists -- requesting
+        # it as filler is how the 1.3.1 incident happened ("it just requested
+        # the top 5 films ... the latest that I added"). Manual per-row
+        # requests bypass this deliberately via request_single_candidate.
+        if not manual and float(item.get("score") or 0) <= 0:
+            # Not an error: the queue is simply exhausted of wanted films.
+            break
         if sent >= max_per_run:
             break
         # Never request something already in the library or already requested.
@@ -743,8 +908,17 @@ def backfill_metadata(wl_id: int, limit: int = 400) -> dict[str, Any]:
     from .metadata.providers import resolve as _resolve
 
     tmdb_key = _integration("tmdb_api_key", "") or None
-    # Wikidata is aggressively throttled for anonymous traffic; widen the pool
-    # but let each call back off on its own rather than serialising everything.
+    if not tmdb_key:
+        # v1.7.0: metadata is TMDB-only. Without a key nothing can be enriched;
+        # say so instead of attempting 800 lookups that each return None.
+        log.warning(
+            "metadata backfill: no TMDB API key configured -- nothing to do. "
+            "Add a free TMDB key in Settings."
+        )
+        return {
+            "ok": False, "attempted": 0, "enriched": 0, "remaining": len(rows),
+            "error": "No TMDB API key configured. Add a free TMDB key in Settings.",
+        }
     enriched = 0
     with ThreadPoolExecutor(max_workers=ENRICH_WORKERS) as pool:
         futures = {
@@ -900,8 +1074,12 @@ def run_cycle(*, sync: bool = True, request: bool = True) -> dict[str, Any]:
                 # Re-read config in case the sync wrote stats
                 wl = db.row_to_watchlist(db.one("SELECT * FROM watchlists WHERE id=?", (wl["id"],)))  # type: ignore[arg-type]
             if request:
-                refresh_scores(wl, cap)
-                r = request_for_watchlist(wl, cap)
+                # v1.7.0: evaluate once, request from the evaluated list. This
+                # used to run the full candidate evaluation twice per cycle
+                # (refresh_scores then request_for_watchlist each called
+                # evaluate_watchlist over every row).
+                evaluated = refresh_scores(wl, cap, return_items=True)
+                r = request_for_watchlist_from_items(wl, evaluated, cap)
                 summary["requests"].append({"id": wl["id"], "name": wl["name"], **r})
         summary["ok"] = True
         return summary

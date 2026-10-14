@@ -48,7 +48,9 @@
       {% if wl.last_sync_at %}<span>{{ wl.last_sync_at[:16].replace('T',' ') }} UTC</span>{% else %}<span>never synced</span>{% endif %}
     </div>
     <div class="nums">
-      <div><span>{{ wl.last_sync_stats.get('added','') }}{{ '' }}</span><small>in list</small></div>
+      <div><span>{{ wl.last_sync_stats.get('fetched', 0) }}</span><small>tracked</small></div>
+      <div><span>{{ wl.pending_count }}</span><small>pending</small></div>
+      <div><span>{{ wl.requested_count }}</span><small>requested</small></div>
     </div>
   </a>
   {% endfor %}

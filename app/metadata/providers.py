@@ -1,16 +1,18 @@
-"""Keyless movie metadata providers.
+"""Movie metadata — TMDB only (operator decision, 2026-10-14).
 
-Priority: no login, no paid API.
+Every field (title, year, ids, genres, countries, languages, rating, dates,
+poster) comes from exactly one source: TMDB, via the free API key configured in
+Settings. No Cinemeta, no IMDb suggestion, no Wikidata, no country-derived
+language guesses -- mixing sources made the same field differ per film and made
+rule results impossible to reason about.
 
-1. **Cinemeta** (``v3-cinemeta.strem.io``) — the public Stremio metadata
-   service. Returns genre, country, language, year, runtime, rating, IMDb id and
-   TMDB id for an IMDb/TMDB id or by title search. Verified live in v1.0.0 dev:
-   it is the richest keyless source available and needs no token.
-2. **IMDb suggestion API** (``v3.sg.media-imdb.com``) — id, title, year, poster
-   resolution by title. Used to turn a Letterboxd slug into an IMDb id.
+A TMDB API key is REQUIRED for enrichment. Without one `resolve()` returns None,
+rows are stored unresolved, and later syncs retry them (backfill_metadata).
 
-An optional TMDB API key can be supplied in Settings; when present it is used
-first, because TMDB is more precise on country-of-origin and language.
+Entry points:
+    resolve(title, year, imdb_id, tmdb_id, slug, tmdb_key) -> MovieMeta | None
+    tmdb_find(title, year, api_key)                         -> by title search
+    tmdb_by_imdb(imdb_id, api_key)                          -> by IMDb id
 """
 from __future__ import annotations
 
@@ -27,51 +29,6 @@ from ..config import settings
 
 log = logging.getLogger("watchlistarr.metadata")
 
-# Dominant-language heuristic by country, used only when Cinemeta AND Wikidata
-# both fail to report a language. Deliberately conservative: it maps only
-# countries where one language overwhelmingly dominates production, and it is
-# flagged on the candidate so the UI can tell a guess from a sourced value.
-COUNTRY_LANGUAGE = {
-    "China": "Mandarin",
-    "Hong Kong": "Cantonese",
-    "Taiwan": "Mandarin",
-    "Japan": "Japanese",
-    "South Korea": "Korean",
-    "India": "Hindi",
-    "France": "French",
-    "Belgium": "French",
-    "Germany": "German",
-    "Austria": "German",
-    "Switzerland": "German",
-    "Italy": "Italian",
-    "Spain": "Spanish",
-    "Mexico": "Spanish",
-    "Argentina": "Spanish",
-    "Russia": "Russian",
-    "Sweden": "Swedish",
-    "Denmark": "Danish",
-    "Norway": "Norwegian",
-    "Finland": "Finnish",
-    "Netherlands": "Dutch",
-    "Poland": "Polish",
-    "Czechia": "Czech",
-    "Greece": "Greek",
-    "Turkey": "Turkish",
-    "Thailand": "Thai",
-    "Brazil": "Portuguese",
-    "Portugal": "Portuguese",
-    "Iran": "Persian",
-    "Egypt": "Arabic",
-    "Ireland": "English",
-    "United Kingdom": "English",
-    "United States": "English",
-    "Canada": "English",
-    "Australia": "English",
-}
-
-
-CINEMETA_BASE = "https://v3-cinemeta.strem.io"
-IMDB_SUGGEST = "https://v3.sg.media-imdb.com/suggestion/x/{query}.json"
 TMDB_BASE = "https://api.themoviedb.org/3"
 
 
@@ -115,6 +72,21 @@ class MovieMeta:
         return d
 
 
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+
 class _TTLCache:
     """Tiny in-process TTL cache; metadata rarely changes and lookups are hot."""
 
@@ -151,189 +123,8 @@ def _client() -> httpx.Client:
         headers={"User-Agent": settings.user_agent, "Accept-Language": "en-US,en;q=0.9"},
     )
 
-
-def _split_csv(value: Any) -> list[str]:
-    if not value:
-        return []
-    if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return [p.strip() for p in str(value).split(",") if p.strip()]
-
-
-def _as_int(value: Any) -> int | None:
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_float(value: Any) -> float | None:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 # --------------------------------------------------------------------------
-# Cinemeta
-# --------------------------------------------------------------------------
-def cinemeta_by_imdb(imdb_id: str) -> MovieMeta | None:
-    key = f"cm:{imdb_id}"
-    if (hit := _cache.get(key)) is not None:
-        return hit
-    try:
-        with _client() as c:
-            r = c.get(f"{CINEMETA_BASE}/meta/movie/{imdb_id}.json")
-        if r.status_code != 200:
-            return None
-        meta = (r.json() or {}).get("meta") or {}
-    except (httpx.HTTPError, ValueError):
-        return None
-    if not meta.get("name"):
-        return None
-
-    year = _as_int(meta.get("year"))
-    out = MovieMeta(
-        title=str(meta.get("name")),
-        year=year,
-        imdb_id=meta.get("imdb_id") or (imdb_id if imdb_id.startswith("tt") else None),
-        tmdb_id=_as_int(meta.get("moviedb_id")),
-        poster=_upgrade_poster(meta.get("poster")),
-        backdrop=meta.get("background"),
-        overview=meta.get("description"),
-        genres=_split_csv(meta.get("genre")),
-        countries=_split_csv(meta.get("country")),
-        languages=_normalise_languages(meta.get("language")),
-        director=", ".join(_split_csv(meta.get("director"))[:2]) or None,
-        runtime=_parse_runtime(meta.get("runtime")),
-        imdb_rating=_as_float(meta.get("imdbRating")),
-        votes=_as_int(meta.get("imdbVotes")),
-        popularity=_as_float(meta.get("popularity")),
-        released=meta.get("released"),
-        provider="cinemeta",
-    )
-    _cache.set(key, out)
-    return out
-
-
-def _parse_runtime(value: Any) -> int | None:
-    if not value:
-        return None
-    m = re.search(r"(\d+)", str(value))
-    return int(m.group(1)) if m else None
-
-
-def _upgrade_poster(poster: str | None) -> str | None:
-    """Cinemeta returns small posters; ask for the large variant."""
-    if not poster:
-        return None
-    return poster.replace("/small/", "/medium/").replace("/thumb/", "/medium/")
-
-
-def _normalise_languages(value: Any) -> list[str]:
-    langs = _split_csv(value)
-    out: list[str] = []
-    for lang in langs:
-        code, _, name = lang.partition(":")
-        out.append((name or code).strip())
-    return [l for l in out if l]
-
-
-def cinemeta_search(title: str, year: int | None = None) -> MovieMeta | None:
-    """Title search through Cinemeta; prefers an exact/year match."""
-    from urllib.parse import quote
-
-    key = f"cms:{title.lower()}:{year}"
-    if (hit := _cache.get(key)) is not None:
-        return hit
-    try:
-        with _client() as c:
-            r = c.get(f"{CINEMETA_BASE}/catalog/movie/top/search={quote(title)}.json")
-        if r.status_code != 200:
-            return None
-        metas = (r.json() or {}).get("metas") or []
-    except (httpx.HTTPError, ValueError):
-        return None
-    if not metas:
-        return None
-
-    def score(m: dict[str, Any]) -> int:
-        s = 0
-        name = str(m.get("name") or m.get("releaseInfo") and m.get("name") or "")
-        if name.lower() == title.lower():
-            s += 50
-        if year and str(m.get("releaseInfo") or "") == str(year):
-            s += 30
-        if m.get("id", "").startswith("tt"):
-            s += 5
-        return s
-
-    best = max(metas, key=score)
-    best_id = best.get("id") or best.get("imdb_id")
-    if best_id and str(best_id).startswith("tt"):
-        full = cinemeta_by_imdb(str(best_id))
-        if full:
-            return full
-    release = str(best.get("releaseInfo") or "")
-    return MovieMeta(
-        title=str(best.get("name") or title),
-        year=_as_int(release[:4]) if release[:4].isdigit() else year,
-        imdb_id=str(best_id) if best_id else None,
-        poster=_upgrade_poster(best.get("poster")),
-        provider="cinemeta",
-    )
-
-
-# --------------------------------------------------------------------------
-# IMDb suggestion API
-# --------------------------------------------------------------------------
-def imdb_suggest(title: str, year: int | None = None) -> MovieMeta | None:
-    from urllib.parse import quote
-
-    key = f"imdbs:{title.lower()}:{year}"
-    if (hit := _cache.get(key)) is not None:
-        return hit
-    try:
-        with _client() as c:
-            r = c.get(IMDB_SUGGEST.format(query=quote(title)))
-        if r.status_code != 200:
-            return None
-        entries = (r.json() or {}).get("d") or []
-    except (httpx.HTTPError, ValueError):
-        return None
-
-    def score(e: dict[str, Any]) -> int:
-        s = 0
-        name = str(e.get("l") or "")
-        if name.lower() == title.lower():
-            s += 50
-        if year and str(e.get("y") or "") == str(year):
-            s += 30
-        if e.get("qid") in ("movie", "feature", "tvshort", "tvmovie"):
-            s += 10
-        return s
-
-    if not entries:
-        return None
-    best = max(entries, key=score)
-    if score(best) < 30:
-        return None
-    img = best.get("i") or {}
-    out = MovieMeta(
-        title=str(best.get("l") or title),
-        year=_as_int(best.get("y")),
-        imdb_id=best.get("id"),
-        poster=img.get("imageUrl"),
-        popularity=_as_float(best.get("rank")),
-        released=best.get("q"),
-        provider="imdb",
-    )
-    _cache.set(key, out)
-    return out
-
-
-# --------------------------------------------------------------------------
-# Optional TMDB (only used when the user supplies a free key)
+# TMDB -- the single metadata source
 # --------------------------------------------------------------------------
 # TMDB /search returns numeric genre_ids; /movie/<id> is the only place names
 # appear. These ids are stable and public, so we can map them without another call.
@@ -345,12 +136,72 @@ _TMDB_GENRE_IDS = {
     10765: "Sci-Fi & Fantasy", 10768: "War & Politics", 10763: "Documentary",
 }
 
+# Complete ISO-639-1 map (generated from TMDB /configuration/languages,
+# 186 entries). Prevents raw codes like 'ta'/'mr'/'my' leaking into the
+# database as if they were language names.
 _TMDB_LANGUAGES = {
-    "en": "English", "zh": "Mandarin", "cn": "Cantonese", "ja": "Japanese",
-    "ko": "Korean", "fr": "French", "de": "German", "es": "Spanish",
-    "it": "Italian", "ru": "Russian", "hi": "Hindi", "pt": "Portuguese",
-    "da": "Danish", "sv": "Swedish", "pl": "Polish", "nl": "Dutch",
-    "tr": "Turkish", "fa": "Persian", "ar": "Arabic", "la": "Latin",
+    "aa": "Afar", "ab": "Abkhazian", "ae": "Avestan",
+    "af": "Afrikaans", "ak": "Akan", "am": "Amharic",
+    "an": "Aragonese", "ar": "Arabic", "as": "Assamese",
+    "av": "Avaric", "ay": "Aymara", "az": "Azerbaijani",
+    "ba": "Bashkir", "be": "Belarusian", "bg": "Bulgarian",
+    "bi": "Bislama", "bm": "Bambara", "bn": "Bengali",
+    "bo": "Tibetan", "br": "Breton", "bs": "Bosnian",
+    "ca": "Catalan", "ce": "Chechen", "ch": "Chamorro",
+    "cn": "Cantonese", "co": "Corsican", "cr": "Cree",
+    "cs": "Czech", "cu": "Slavic", "cv": "Chuvash",
+    "cy": "Welsh", "da": "Danish", "de": "German",
+    "dv": "Divehi", "dz": "Dzongkha", "ee": "Ewe",
+    "el": "Greek", "en": "English", "eo": "Esperanto",
+    "es": "Spanish", "et": "Estonian", "eu": "Basque",
+    "fa": "Persian", "ff": "Fulah", "fi": "Finnish",
+    "fj": "Fijian", "fo": "Faroese", "fr": "French",
+    "fy": "Frisian", "ga": "Irish", "gd": "Gaelic",
+    "gl": "Galician", "gn": "Guarani", "gu": "Gujarati",
+    "gv": "Manx", "ha": "Hausa", "he": "Hebrew",
+    "hi": "Hindi", "ho": "Hiri Motu", "hr": "Croatian",
+    "ht": "Haitian; Haitian Creole", "hu": "Hungarian", "hy": "Armenian",
+    "hz": "Herero", "ia": "Interlingua", "id": "Indonesian",
+    "ie": "Interlingue", "ig": "Igbo", "ii": "Yi",
+    "ik": "Inupiaq", "io": "Ido", "is": "Icelandic",
+    "it": "Italian", "iu": "Inuktitut", "ja": "Japanese",
+    "jv": "Javanese", "ka": "Georgian", "kg": "Kongo",
+    "ki": "Kikuyu", "kj": "Kuanyama", "kk": "Kazakh",
+    "kl": "Kalaallisut", "km": "Khmer", "kn": "Kannada",
+    "ko": "Korean", "kr": "Kanuri", "ks": "Kashmiri",
+    "ku": "Kurdish", "kv": "Komi", "kw": "Cornish",
+    "ky": "Kirghiz", "la": "Latin", "lb": "Letzeburgesch",
+    "lg": "Ganda", "li": "Limburgish", "ln": "Lingala",
+    "lo": "Lao", "lt": "Lithuanian", "lu": "Luba-Katanga",
+    "lv": "Latvian", "mg": "Malagasy", "mh": "Marshall",
+    "mi": "Maori", "mk": "Macedonian", "ml": "Malayalam",
+    "mn": "Mongolian", "mo": "Moldavian", "mr": "Marathi",
+    "ms": "Malay", "mt": "Maltese", "my": "Burmese",
+    "na": "Nauru", "nb": "Norwegian Bokmål", "nd": "Ndebele",
+    "ne": "Nepali", "ng": "Ndonga", "nl": "Dutch",
+    "nn": "Norwegian Nynorsk", "no": "Norwegian", "nr": "Ndebele",
+    "nv": "Navajo", "ny": "Chichewa; Nyanja", "oc": "Occitan",
+    "oj": "Ojibwa", "om": "Oromo", "or": "Oriya",
+    "os": "Ossetian; Ossetic", "pa": "Punjabi", "pi": "Pali",
+    "pl": "Polish", "ps": "Pushto", "pt": "Portuguese",
+    "qu": "Quechua", "rm": "Raeto-Romance", "rn": "Rundi",
+    "ro": "Romanian", "ru": "Russian", "rw": "Kinyarwanda",
+    "sa": "Sanskrit", "sc": "Sardinian", "sd": "Sindhi",
+    "se": "Northern Sami", "sg": "Sango", "sh": "Serbo-Croatian",
+    "si": "Sinhalese", "sk": "Slovak", "sl": "Slovenian",
+    "sm": "Samoan", "sn": "Shona", "so": "Somali",
+    "sq": "Albanian", "sr": "Serbian", "ss": "Swati",
+    "st": "Sotho", "su": "Sundanese", "sv": "Swedish",
+    "sw": "Swahili", "ta": "Tamil", "te": "Telugu",
+    "tg": "Tajik", "th": "Thai", "ti": "Tigrinya",
+    "tk": "Turkmen", "tl": "Tagalog", "tn": "Tswana",
+    "to": "Tonga", "tr": "Turkish", "ts": "Tsonga",
+    "tt": "Tatar", "tw": "Twi", "ty": "Tahitian",
+    "ug": "Uighur", "uk": "Ukrainian", "ur": "Urdu",
+    "uz": "Uzbek", "ve": "Venda", "vi": "Vietnamese",
+    "vo": "Volapük", "wa": "Walloon", "wo": "Wolof",
+    "xh": "Xhosa", "yi": "Yiddish", "yo": "Yoruba",
+    "za": "Zhuang", "zh": "Mandarin", "zu": "Zulu",
 }
 
 
@@ -362,6 +213,44 @@ def _language_name(code: str | None) -> str | None:
     if not code:
         return None
     return _TMDB_LANGUAGES.get(code, code)
+
+
+_PLACEHOLDER_LANGUAGES = {"no language", "none", "unknown", ""}
+
+
+def _merge_language_forms(languages: list[str]) -> list[str]:
+    """Collapse ISO-code entries into their named form; drop placeholders.
+
+    TMDB can report one film's language as 'ta' (original_language) AND 'Tamil'
+    (spoken_languages). Storing both double-counted the language on the
+    dashboard and showed raw codes as if they were languages. A code entry is
+    stored only as its resolved name; unmappable short codes are dropped; and
+    placeholders like 'No Language' are removed entirely. Order preserved.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name: str) -> None:
+        low = name.strip().lower()
+        if not low or low in _PLACEHOLDER_LANGUAGES or low in seen:
+            return
+        seen.add(low)
+        out.append(name.strip())
+
+    for lang in languages or []:
+        s = (lang or "").strip()
+        if not s:
+            continue
+        if re.fullmatch(r"[a-z]{2,3}(-[A-Za-z]{2,4})?", s):
+            # ISO-code-shaped: store only its resolved name.
+            name = _TMDB_LANGUAGES.get(s.lower())
+            if name:
+                _add(name)
+            # An unmappable short code is dropped: a raw code is never a useful
+            # rule value and only pollutes the dashboard.
+            continue
+        _add(s)
+    return out
 
 
 _COUNTRY_NORMALISE = {
@@ -416,22 +305,6 @@ _COUNTRY_NORMALISE = {
 }
 
 
-_COUNTRY_DEFAULT_LANGUAGE = {
-    "United States": "English", "United Kingdom": "English", "India": "Hindi",
-    "China": "Mandarin", "Hong Kong": "Cantonese", "Taiwan": "Mandarin",
-    "Japan": "Japanese", "South Korea": "Korean", "France": "French",
-    "Germany": "German", "Italy": "Italian", "Spain": "Spanish",
-    "Russia": "Russian", "Brazil": "Portuguese", "Mexico": "Spanish",
-    "Sweden": "Swedish", "Denmark": "Danish", "Norway": "Norwegian",
-    "Finland": "Finnish", "Poland": "Polish", "Netherlands": "Dutch",
-    "Turkey": "Turkish", "Iran": "Persian", "Egypt": "Arabic",
-    "Nigeria": "English", "Canada": "English", "Australia": "English",
-    "Belgium": "Dutch", "Austria": "German", "Switzerland": "German",
-    "Greece": "Greek", "Portugal": "Portuguese", "Ireland": "English",
-    "Thailand": "Thai", "Indonesia": "Indonesian", "Argentina": "Spanish",
-    "Chile": "Spanish", "Colombia": "Spanish", "Romania": "Romanian",
-    "Czech Republic": "Czech", "Hungary": "Hungarian", "Ukraine": "Ukrainian",
-}
 
 
 def _country_name(raw: str) -> str:
@@ -480,6 +353,13 @@ def _tmdb_detail(tmdb_id: Any, api_key: str) -> MovieMeta | None:
         name = entry.get("english_name") or entry.get("name")
         if name and name not in languages:
             languages.append(name)
+    # v1.7.1: TMDB sometimes carries only the ISO code in original_language
+    # ("ta", "mr", "my") when the code is missing from our small name map, and
+    # spoken_languages may carry the same language under its full English name
+    # ("Tamil"). The old code stored BOTH, so the dashboard counted the same
+    # language twice and showed raw codes as if they were languages. Merge
+    # code-form and name-form entries, then drop placeholders.
+    languages = _merge_language_forms(languages)
 
     poster_path = payload.get("poster_path")
     backdrop_path = payload.get("backdrop_path")
@@ -503,14 +383,6 @@ def _tmdb_detail(tmdb_id: Any, api_key: str) -> MovieMeta | None:
         provider="tmdb",
     )
 
-
-def _language_from_countries(countries: list[str]) -> str | None:
-    """Heuristic dominant language from country of origin. Last resort only."""
-    for c in countries or []:
-        lang = _COUNTRY_DEFAULT_LANGUAGE.get(c)
-        if lang:
-            return lang
-    return None
 
 
 def tmdb_find(title: str, year: int | None, api_key: str) -> MovieMeta | None:
@@ -615,64 +487,51 @@ def resolve(
     slug: str | None = None,
     tmdb_key: str | None = None,
 ) -> MovieMeta | None:
-    """Resolve one film from a single authoritative source per field.
+    """Resolve one film from TMDB. A TMDB key is REQUIRED.
 
-    Standardisation rule: each field is owned by exactly one provider and is
-    never assembled by appending values from several. Mixing sources made the
-    same genre/country list differ per film and appended duplicates, which made
-    rule results impossible to reason about.
+    Precedence: direct tmdb_id lookup when available (cheapest and exact),
+    then IMDb-id -> TMDB find, then title/year search. Title search is
+    validated against the requested title and the year is part of the match
+    key, so a 1962 "Highway" can never store a 2014 "Highway".
 
-    Precedence, highest first:
-      1. TMDB  -- authoritative for genres, countries, languages, rating, dates.
-      2. Cinemeta -- keyless fallback when no TMDB key is configured.
-      3. IMDb suggestion -- last-ditch identification only.
-      4. Wikidata -- language only, and only when nothing above supplied one.
-      5. A country-derived language guess -- last resort, flagged as guessed.
-
-    `slug` is the Letterboxd identifier, kept for provenance.
+    Returns None when there is no key, the lookup fails, or nothing plausibly
+    matches -- callers store the row as unresolved and a later sync retries.
     """
-    best: MovieMeta | None = None
-    source_used: str | None = None
-
-    # TMDB first when a key exists: it is the only provider that returns genre,
-    # country and language names rather than just ids.
-    if tmdb_key:
-        best = tmdb_find(title, year, tmdb_key)
-        if best is not None:
-            source_used = "tmdb"
-        elif imdb_id and str(imdb_id).startswith("tt"):
-            by_imdb = tmdb_by_imdb(imdb_id, tmdb_key)
-            if by_imdb is not None:
-                best = by_imdb
-                source_used = "tmdb"
-
-    if best is None and imdb_id and str(imdb_id).startswith("tt"):
-        # Identifiers are still worth a lookup: matching an IMDb id to its TMDB
-        # record stays within the single TMDB source.
-        best = tmdb_by_imdb(imdb_id, tmdb_key)
-        source_used = "tmdb" if best is not None else None
-
-    if best is None:
-        # No other provider is consulted. Storing Cinemeta/IMDb/Wikidata values
-        # alongside TMDB produced inconsistent genre and country lists for the
-        # same provider across films, so a field is now either present from TMDB
-        # or empty and retryable.
+    if not tmdb_key:
+        log.info(
+            "tmdb: no API key configured; cannot enrich %r "
+            "(add a free TMDB key in Settings)", title,
+        )
         return None
 
-    # Identifiers are authoritative from the source we matched, with the
-    # caller's own ids filling genuine gaps. Never overwrite a found id.
+    best: MovieMeta | None = None
+
+    if tmdb_id:
+        try:
+            best = _tmdb_detail(int(tmdb_id), tmdb_key)
+        except (TypeError, ValueError):
+            best = None
+
+    if best is None and imdb_id and str(imdb_id).startswith("tt"):
+        best = tmdb_by_imdb(str(imdb_id), tmdb_key)
+
+    if best is None:
+        best = tmdb_find(title, year, tmdb_key)
+
+    if best is None:
+        return None
+
+    # Never overwrite an id the matched source found; fill genuine gaps from
+    # the caller's own identifiers.
     if best.imdb_id is None and imdb_id and str(imdb_id).startswith("tt"):
         best.imdb_id = str(imdb_id)
     if best.tmdb_id is None and tmdb_id:
-        best.tmdb_id = tmdb_id
+        best.tmdb_id = str(tmdb_id)
     if best.year is None and year:
         best.year = year
     if best.slug is None and slug:
         best.slug = slug
 
-    # No inference: a field is present from TMDB or empty. The UI shows
-    # "not tagged" rather than a guessed value.
-    best.provider = source_used or best.provider
     return best
 
 
@@ -702,20 +561,3 @@ def tmdb_by_imdb(imdb_id: str, api_key: str) -> MovieMeta | None:
         return None
     _cache.set(key, detail)
     return detail
-
-
-
-def _merge(primary: MovieMeta | None, extra: MovieMeta) -> MovieMeta:
-    """Fill gaps in `primary` from `extra` without overwriting real data."""
-    if primary is None:
-        return extra
-    for f in (
-        "year", "imdb_id", "tmdb_id", "poster", "backdrop", "overview",
-        "director", "runtime", "imdb_rating", "votes", "popularity", "released", "slug",
-    ):
-        if getattr(primary, f) in (None, ""):
-            setattr(primary, f, getattr(extra, f))
-    for f in ("genres", "countries", "languages"):
-        if not getattr(primary, f) and getattr(extra, f):
-            setattr(primary, f, list(getattr(extra, f)))
-    return primary

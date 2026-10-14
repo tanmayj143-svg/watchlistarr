@@ -33,7 +33,7 @@ NUMERIC_KINDS = {"rating", "letterboxd_rating", "popularity", "runtime", "year",
                  "decade", "source_position"}
 LIST_KINDS = {"genre", "country", "language", "source_position"}
 CAPACITY_KINDS = {"capacity", "min_free_gb", "max_free_gb"}
-PACE_KINDS = {"pace"}  # driven by the per-watchlist Pace setting, not the UI
+PACE_KINDS = {"pace", "frequency"}  # frequency trigger (v1.7.2), historical name 'pace' kept
 
 ALL_KINDS = LIST_KINDS | NUMERIC_KINDS | CAPACITY_KINDS | PACE_KINDS | {"manual"}
 
@@ -236,8 +236,8 @@ class Scorer:
             return self._number_match(rule, cand.get("runtime"), f"runtime {cand.get('runtime')}m")
         if kind == "source_position":
             return self._number_match(rule, cand.get("source_position"), f"position {cand.get('source_position')}")
-        if kind == "pace":
-            return self._pace_match(rule, cand, now)
+        if kind in ("pace", "frequency"):
+            return self._frequency_match(rule, cand, now)
         if kind == "capacity":
             return self._capacity_match(rule, cand, now)
         if kind == "min_free_gb":
@@ -448,42 +448,83 @@ class Scorer:
             if est > 0 and free < est:
                 return True, 0.0, f"free {free:.1f} GB cannot fit an estimated {est:g} GB film"
 
-            if est > 0 and free <= th:
-                # Taking this film would refill past the ceiling -> hold off.
-                if (free - est) > th:
-                    return (
-                        True,
-                        0.0,
-                        f"free {free:.1f} GB; a {est:g} GB film would leave "
-                        f"{free - est:.1f} GB, above the {th:g} GB ceiling",
-                    )
-                return False, 0.0, f"free {free:.1f} GB, adding brings it to {free - est:.1f} GB"
-
-            if free > th:
+            if free < th:
                 return (
                     True,
                     0.0,
-                    f"storage ceiling: {free:.1f} GB free is above the {th:g} GB ceiling, topping up paused",
+                    f"storage ceiling: only {free:.1f} GB free is below the {th:g} GB ceiling, topping up paused",
                 )
-            return False, 0.0, f"free {free:.1f} GB <= ceiling {th:g} GB"
 
-    def _pace_match(self, rule: Rule, cand: dict[str, Any], now: datetime) -> tuple[bool, float, str]:
-        """Pace: "at most N per window" -- the single X-per-Y control.
+            if est > 0 and (free - est) < th:
+                return (
+                    True,
+                    0.0,
+                    f"free {free:.1f} GB; a {est:g} GB film would leave "
+                    f"{free - est:.1f} GB, below the {th:g} GB ceiling",
+                )
 
-        A match means BLOCK, so this returns True only once the window is full.
-        The UI exposes this as the Pace setting rather than as a rule row, which
-        is why it has no entry in the kind dropdown.
+            return False, 0.0, f"free {free:.1f} GB >= ceiling {th:g} GB OK"
+
+    def _frequency_match(self, rule: Rule, cand: dict[str, Any], now: datetime) -> tuple[bool, float, str]:
+        """Frequency: "N per window" = one request every window_length/N days.
+
+        v1.7.2 (operator decision): this is a RATE, not a burst cap. The window
+        is divided into N equal slots; a request goes out when the previous
+        request within this window is at least one slot old. When all N slots
+        of the current window are spent, it waits for the next window.
+
+        A match means BLOCK. The film's score is never touched.
         """
-        target = float(rule.threshold if rule.threshold is not None else 5)
+        target = float(rule.threshold if rule.threshold is not None else 1)
         name = rule.window or "month"
-        per_window = cand.get("_window_counts") or {}
-        if name in per_window:
-            counted = int(per_window.get(name) or 0)
-        else:
-            counted = int(cand.get("_window_request_count") or 0)
+        if target <= 0:
+            return False, 0.0, "frequency disabled (count 0)"
         window = resolve_window(name, now)
-        exhausted = counted >= target
-        return exhausted, 0.0, f"pace: {counted:g}/{target:g} requested {window.label}"
+        per_window = cand.get("_window_counts") or {}
+        counted = int(per_window.get(name) or 0)
+
+        # Quota exhausted for this window -> wait for the next one.
+        if counted >= target:
+            return True, 0.0, (
+                f"frequency: {counted:g}/{target:g} requested {window.label}, "
+                f"next slot at the window reset"
+            )
+
+        # Even spread: the slot length is window_length / N. The reference time
+        # is the most recent request (any watchlist candidate's requested_at),
+        # falling back to the window start for the first slot.
+        slot = window.timedelta / target
+        last_raw = (cand.get("_window_last_requested_at") or "")
+        last = None
+        if last_raw:
+            try:
+                last = datetime.fromisoformat(str(last_raw))
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+            except (TypeError, ValueError):
+                last = None
+        if last is None:
+            # No prior request inside this window: the first slot is open.
+            return False, 0.0, (
+                f"frequency: slot 1/{target:g} open {window.label} "
+                f"(one every {slot.total_seconds() / 86400:.1f} days)"
+            )
+        elapsed = now - last
+        if elapsed >= slot:
+            return False, 0.0, (
+                f"frequency: slot {counted + 1:g}/{target:g} open {window.label} "
+                f"(last request {elapsed.total_seconds() / 86400:.1f} days ago, "
+                f"slot is {slot.total_seconds() / 86400:.1f} days)"
+            )
+        remaining = (slot - elapsed).total_seconds() / 86400
+        return True, 0.0, (
+            f"frequency: next slot in {remaining:.1f} days "
+            f"({counted:g}/{target:g} used {window.label})"
+        )
+
+    # Historical name kept so persisted rules kind='pace' keep working.
+    def _pace_match(self, rule: Rule, cand: dict[str, Any], now: datetime) -> tuple[bool, float, str]:
+        return self._frequency_match(rule, cand, now)
 
     def _manual_match(self, rule: Rule, cand: dict[str, Any]) -> tuple[bool, float, str]:
         flag = bool((cand.get("meta") or {}).get("manual_flags") or {})

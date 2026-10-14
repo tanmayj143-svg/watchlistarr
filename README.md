@@ -1,15 +1,6 @@
 # Watchlistarr
 
-**Version: 1.6.5**
-
-> ⚠️ **AI-GENERATED CODE — READ THIS FIRST**
-> This entire project (application code, tests, documentation) was written by an
-> **AI assistant** (Hermes Agent, by Nous Research) under human direction. It is
-> provided **as-is, with no warranty of any kind**. It has been exercised against
-> live services by its operator, but it has **not** been independently audited,
-> security-reviewed, or certified. Review it yourself before trusting it with
-> credentials, network exposure, or unattended automation. See
-> [`DISCLAIMER.md`](DISCLAIMER.md) for the full statement.
+**Version: 1.7.3**
 
 Reads your Letterboxd (and IMDb) watchlists, scores every movie against
 point-based priority rules you control, and sends the winners to **Seerr**
@@ -19,7 +10,7 @@ Built for the ARR ecosystem: it asks ARR for nothing except an API key, keeps it
 own state in SQLite, and has no login of its own beyond a single admin password.
 
 - **WebUI:** http://<host>:7777
-- **No paid API required.** Every data source is free and keyless.
+- **No paid API required.** TMDB (free key) + Letterboxd cover everything.
 - **First boot asks you to create a login.** Once, then never again.
 
 ---
@@ -27,7 +18,7 @@ own state in SQLite, and has no login of its own beyond a single admin password.
 ## What it actually does
 
 ```
-Letterboxd list ──► metadata (genre/country/language/year/rating)
+Letterboxd list ──► metadata (TMDB: genre/country/language/year/rating)
                           │
                           ▼
                    your priority rules
@@ -44,8 +35,8 @@ Examples it expresses directly, with no code:
 
 | You want | Build these rules |
 |---|---|
-| Films from 1960s China this month | Country=China **+30**, Decade=1960 **+40**, Language=Mandarin **+20**, Quota 4/month (hard) |
-| Sci-Fi this week | Genre=Sci-Fi **+40**, Rating≥7 **+15**, Quota 2/week (hard) |
+| Films from 1960s China this month | Country=China **+30**, Decade=1960 **+40**, Language=Mandarin **+20**, Frequency 4/month |
+| Sci-Fi this week | Genre=Sci-Fi **+40**, Rating≥7 **+15**, Frequency 2/week |
 | Only when the disk allows | Disk free GB < 100 → block (hard) |
 
 ---
@@ -70,6 +61,10 @@ settings and request history.
 - **Seerr API key** — Seerr → Settings → General → API Key → *Show* → copy
 
 Press **Test Seerr connection**. You should see `Connected — Jellyseerr v2.x.x`.
+
+**A free TMDB API key is required (v1.7.0)** — metadata comes from TMDB only:
+
+- themoviedb.org → account → Settings → API → create a developer key → copy the *API Key (v3 auth)*
 
 **Radarr is optional.** Adding it unlocks disk-space and library-count rules:
 
@@ -139,7 +134,9 @@ the order is decided by Letterboxd rating, then IMDb rating, then your own list
 order — so the ranking is always meaningful rather than arbitrary. Two rule types are **limits** instead of scorers — they stop
 requests outright:
 
-- **Quota** — "at most 4 per month". Exhausted means nothing gets requested.
+- **Frequency** — "4 per month" means one request every 30 ÷ 4 ≈ 7.5 days: the
+  window is split into equal slots and the next slot opens one slot-length
+  after the last request. Even spread, not a burst cap.
 - **Disk / library** — "block while under 100 GB free".
 
 Negative points work as penalties. `Rating ≥ 8 → +20` plus
@@ -150,14 +147,18 @@ never a black box.
 
 ---
 
-## Data sources (all free, no login)
+## Data sources (all free)
 
 | Source | Used for | Status |
 |---|---|---|
 | Letterboxd | lists & watchlists | primary, reliable |
-| Cinemeta | genre, country, year, rating, IMDb/TMDB ids | keyless |
-| Wikidata | language (fills Cinemeta's gaps) | keyless, rate-limited |
+| TMDB | **all metadata** (v1.7.0) | free key **required** |
 | IMDb Lists | movie lists | **experimental** — often blocked |
+
+Since v1.7.0 every metadata field comes from TMDB only — no Cinemeta, no
+Wikidata, no country-derived guesses. A free TMDB key (themoviedb.org) is
+required for enrichment; without it films stay unresolved and are retried on
+later syncs.
 
 Letterboxd's RSS feeds sit behind a Cloudflare challenge, so Watchlistarr parses
 the HTML pages instead. See `docs/SOURCES.md` for detail.
@@ -218,10 +219,10 @@ lower the sync interval. Your server's shared IP is the usual cause.
 **Sync feels slow** — first sync enriches every new movie over the network. Later
 syncs only process new items and are much faster.
 
-**Language sliders match nothing** — language comes from Wikidata, which
-rate-limits anonymous callers. Watchlistarr falls back to a
-country-of-origin heuristic and marks those rows; wait for the quota to reset for
-fully sourced data.
+**Language sliders match nothing** — check a TMDB key is set in Settings
+(v1.7.0: language data comes only from TMDB's original/spoken-language fields).
+Films synced before the key was added stay unresolved until a later sync or a
+metadata backfill.
 
 ---
 

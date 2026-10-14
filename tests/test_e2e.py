@@ -28,9 +28,17 @@ os.environ["RADARR_API_KEY"] = "test-key"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tests.mock_arr import serve  # noqa: E402
+from tests.mock_arr import serve, serve_tmdb  # noqa: E402
 
 serve()
+serve_tmdb()
+
+# v1.7.0: metadata is TMDB-only. Point the provider at the mock TMDB and set a
+# key before anything resolves metadata.
+import app.metadata.providers as _providers  # noqa: E402
+from app import settings_service as _svc  # noqa: E402
+
+_providers.TMDB_BASE = "http://127.0.0.1:5998/3x".replace("/3x", "") + "/3"
 
 from app import db, engine, settings_service as svc, watchlists as wl_svc  # noqa: E402
 
@@ -60,6 +68,8 @@ def main() -> int:
     token = svc.issue_token("admin")
     check("session token verifies", svc.verify_token(token) == "admin")
     check("tampered token rejected", svc.verify_token(token + "x") is None)
+
+    _svc.set_integration("tmdb_api_key", "e2e-mock-key")
 
     print("\n2. source adapter against live Letterboxd")
     from app.sources.letterboxd import LetterboxdSource, discover_lists

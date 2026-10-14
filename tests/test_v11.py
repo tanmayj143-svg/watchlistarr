@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 os.environ.setdefault("WATCHLISTARR_DATA", tempfile.mkdtemp(prefix="wlarr-v11-"))
@@ -99,10 +99,10 @@ check("min_free blocks below floor",
 check("min_free allows at/above floor", _apply_storage_guards(g, cap(150)) is None)
 
 g2 = {"min_free_gb": None, "max_free_gb": 500.0, "est_movie_gb": None}
-check("max_free blocks above ceiling",
-      "ceiling" in (_apply_storage_guards(g2, cap(900)) or ""),
-      str(_apply_storage_guards(g2, cap(900))))
-check("max_free allows at/below ceiling", _apply_storage_guards(g2, cap(400)) is None)
+check("max_free blocks below ceiling",
+      "ceiling" in (_apply_storage_guards(g2, cap(400)) or ""),
+      str(_apply_storage_guards(g2, cap(400))))
+check("max_free allows at/above ceiling", _apply_storage_guards(g2, cap(900)) is None)
 
 both = {"min_free_gb": 100.0, "max_free_gb": 500.0, "est_movie_gb": None}
 check("floor wins when both would trigger", "storage floor" in (_apply_storage_guards(both, cap(40)) or ""))
@@ -128,27 +128,26 @@ check("min_free_gb rule allows above floor", s_ok.score({"title": "x"}, now=NOW)
 s_max = Scorer(parse_rules([
     {"id": "ceil", "kind": "max_free_gb", "comparator": "lte", "threshold": 500,
      "limit": True, "points": 0},
-]), capacity=cap(800))
+]), capacity=cap(400))
 r2 = s_max.score({"title": "x"}, now=NOW)
-check("max_free_gb rule blocks above ceiling", not r2.eligible, str(r2.rejected_by))
+check("max_free_gb rule blocks below ceiling", not r2.eligible, str(r2.rejected_by))
 
-# look-ahead: 502 GB free, ceiling 500, film 4 GB -> taking it would leave
-# 498 (fine); at 503 free it would leave 499... still fine. The guard fires when
-# free space is AT/BELOW the ceiling and the film would refill past it.
+# look-ahead: 510 GB free, ceiling 500, film 4 GB -> taking it leaves 506 GB (above ceiling, ok)
 s_look = Scorer(parse_rules([
     {"id": "ceil", "kind": "max_free_gb", "comparator": "lte", "threshold": 500,
      "threshold2": 4, "limit": True, "points": 0},
-]), capacity=cap(500))
+]), capacity=cap(510))
 r3 = s_look.score({"title": "x"}, now=NOW)
-check("ceiling look-ahead lets a film that lands under the ceiling", r3.eligible,
+check("ceiling look-ahead lets a film that stays above ceiling", r3.eligible,
       str(r3.rejected_by))
 
+# look-ahead: 510 GB free, ceiling 500, film 40 GB -> taking it leaves 470 GB (drops below ceiling, hold off)
 s_look2 = Scorer(parse_rules([
     {"id": "ceil", "kind": "max_free_gb", "comparator": "lte", "threshold": 500,
      "threshold2": 40, "limit": True, "points": 0},
 ]), capacity=cap(510))
 r4 = s_look2.score({"title": "x"}, now=NOW)
-check("ceiling look-ahead holds off a film that would overshoot", not r4.eligible,
+check("ceiling look-ahead holds off a film that drops below ceiling", not r4.eligible,
       str(r4.rejected_by))
 
 s_nofit = Scorer(parse_rules([
@@ -207,13 +206,16 @@ under = Scorer(parse_rules([
 ]))
 check("weekly pace under the cap allows", under.score(dict(base), now=NOW).eligible)
 
-# Legacy shape (no _window_counts) must still work via the fallback.
-legacy = {"title": "x", "_window_request_count": 5}
+# Legacy shape (no _window_counts): the engine always supplies _window_counts,
+# so this now asserts the frequency contract directly (v1.7.2).
+legacy = {"title": "x", "_window_counts": {"month": 5},
+          "_window_last_requested_at": (NOW - timedelta(days=3)).isoformat()}
 r3 = Scorer(parse_rules([
     {"id": "pace", "kind": "pace", "window": "month", "threshold": 5,
      "limit": True, "points": 0},
 ])).score(legacy, now=NOW)
-check("fallback to _window_request_count still works", not r3.eligible)
+check("full window blocks regardless of timestamp", not r3.eligible,
+      str(r3.rejected_by and r3.rejected_by["reason"]))
 
 
 # ---------------------------------------------------------------------------

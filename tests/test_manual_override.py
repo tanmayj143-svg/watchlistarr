@@ -147,6 +147,9 @@ _orig_int = _eng._integration
 def _fake_int(key, default=None):
     if key in ("seerr_url", "seerr_api_key"):
         return "http://seerr.test" if key == "seerr_url" else "k"
+    if key == "tmdb_api_key":
+        # v1.7.0: metadata is TMDB-only, so the backfill needs a key to run.
+        return "test-key"
     return _orig_int(key, default)
 
 
@@ -169,6 +172,8 @@ finally:
     _eng._window_counts = _real_counts
 
 print("\n4. Metadata backfill only touches films missing metadata")
+# v1.7.0: metadata is TMDB-only, so the backfill requires a key.
+_svc.set_integration("tmdb_api_key", "test-key")
 now = _db.now()
 for i, title in enumerate(["No Genres", "Has Genres"]):
     genres = "[]" if title == "No Genres" else _db.json.dumps(["Drama"])

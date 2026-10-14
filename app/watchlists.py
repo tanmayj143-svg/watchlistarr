@@ -27,10 +27,26 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 
 def list_watchlists() -> list[dict[str, Any]]:
-    return [
+    out = [
         db.row_to_watchlist(r)
         for r in db.query("SELECT * FROM watchlists ORDER BY sort_order, id")
     ]
+    # v1.7.0: real per-list counts for the dashboard cards. The old template
+    # read last_sync_stats['added'], a key that never existed, so every card
+    # showed a blank "in list" number.
+    counts = {
+        r["watchlist_id"]: r
+        for r in db.query(
+            "SELECT watchlist_id, COUNT(*) AS total, "
+            "SUM(CASE WHEN status='requested' THEN 1 ELSE 0 END) AS requested_count "
+            "FROM candidates GROUP BY watchlist_id"
+        )
+    }
+    for wl in out:
+        c = counts.get(wl["id"])
+        wl["requested_count"] = int(c["requested_count"] or 0) if c else 0
+        wl["pending_count"] = (int(c["total"] or 0) - wl["requested_count"]) if c else 0
+    return out
 
 
 def get_watchlist(wl_id: int) -> dict[str, Any] | None:

@@ -73,7 +73,7 @@ def test_1960s_china_month():
 
 
 def test_scifi_week_pace_blocks():
-    """Pace of 2/week must reject everything once 2 are already requested."""
+    """Frequency of 2/week must reject everything once both slots are spent."""
     rules = parse_rules([
         {"id": "pace", "kind": "pace", "window": "week", "threshold": 2,
          "limit": True, "points": 0},
@@ -82,13 +82,20 @@ def test_scifi_week_pace_blocks():
     s = Scorer(rules)
     sf = cand(genres=["Sci-Fi"])
 
-    under = s.score(cand(genres=["Sci-Fi"], _window_request_count=1), now=NOW)
+    # v1.7.2: frequency is even-spread. One request inside the current week,
+    # older than the slot (week/2 = 3.5 days) -> slot 2 open.
+    under = s.score({**sf, "_window_counts": {"week": 1},
+                     "_window_last_requested_at": (NOW - timedelta(days=4)).isoformat()},
+                    now=NOW)
     assert under.eligible and under.score == 40
 
-    at_quota = s.score(cand(genres=["Sci-Fi"], _window_request_count=2), now=NOW)
+    # Both slots spent -> reject regardless of the last timestamp.
+    at_quota = s.score({**sf, "_window_counts": {"week": 2},
+                        "_window_last_requested_at": (NOW - timedelta(days=4)).isoformat()},
+                       now=NOW)
     assert not at_quota.eligible, "pace must reject at the cap"
     assert at_quota.rejected_by and at_quota.rejected_by["rule"]["id"] == "pace"
-    print("ok  Sci-Fi week pace blocks at 2:", under.score, "-> rejected")
+    print("ok  Sci-Fi week frequency blocks at 2:", under.score, "-> rejected")
 
 
 def test_disk_space_gate():
