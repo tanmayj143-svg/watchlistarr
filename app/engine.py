@@ -246,7 +246,7 @@ def sync_watchlist(wl: dict[str, Any], *, enrich_limit: int = 400) -> dict[str, 
     if new_items:
         try:
             got = backfill_letterboxd_ratings(
-                wl["id"], limit=min(60, new_items), slugs=[i.slug for i in new_items if i.slug]
+                wl["id"], limit=min(60, len(new_items)), slugs=[i.slug for i in new_items if i.slug]
             )
             stats["lb_ratings"] = got.get("stored", 0)
         except Exception as exc:
@@ -662,6 +662,15 @@ def request_for_watchlist(
             sent += 1
             stats["requested" if not result.already else "already"] += 1
         else:
+            is_net_err = isinstance(result.detail, str) and result.detail.startswith("Network error")
+            if is_net_err:
+                log.warning(
+                    "Seerr network error for %s: %s. Halting batch to preserve pending items.",
+                    item.get("title"),
+                    result.detail,
+                )
+                stats["errors"] += 1
+                return {**stats, "ok": False, "error": result.detail}
             db.execute(
                 "UPDATE candidates SET status=?, last_reason=?, updated_at=? WHERE id=?",
                 (STATUS_ERROR, result.detail, db.now(), item["id"]),

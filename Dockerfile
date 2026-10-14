@@ -7,7 +7,7 @@ FROM python:3.11-slim
 
 LABEL org.opencontainers.image.title="Watchlistarr" \
       org.opencontainers.image.description="Letterboxd/IMDb watchlists -> scored Seerr requests" \
-      org.opencontainers.image.version="1.6.4" \
+      org.opencontainers.image.version="1.6.5" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONUNBUFFERED=1 \

@@ -13,7 +13,7 @@ from pathlib import Path
 APP_NAME = "Watchlistarr"
 # Single source of truth for the version: kept in step with the Docker tag by
 # tests/test_version_consistency.py, which reads this literal out of the file.
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.6.5"
 APP_SLUG = "watchlistarr"
 
 

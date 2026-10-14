@@ -1,7 +1,7 @@
 services:
   watchlistarr:
     build: .
-    image: watchlistarr:1.6.4
+    image: watchlistarr:1.6.5
     container_name: watchlistarr
     restart: unless-stopped
     ports:

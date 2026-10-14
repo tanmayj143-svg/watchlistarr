@@ -1,6 +1,6 @@
 # Watchlistarr
 
-**Version: 1.6.4**
+**Version: 1.6.5**
 
 > ⚠️ **AI-GENERATED CODE — READ THIS FIRST**
 > This entire project (application code, tests, documentation) was written by an

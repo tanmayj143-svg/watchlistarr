@@ -104,8 +104,44 @@ def _interval(key: str, default_minutes: int) -> int:
     return max(5, minutes)
 
 
+def _should_retry_unmet_pace() -> bool:
+    """Check if any enabled watchlist has an unmet pace quota and pending candidates."""
+    try:
+        from datetime import datetime, timezone
+        from .. import db
+        from ..engine import _window_counts, STATUS_REQUESTED
+        now = datetime.now(timezone.utc)
+        watchlists = db.query("SELECT * FROM watchlists")
+        for row in watchlists:
+            wl = db.row_to_watchlist(row)
+            cfg = wl.get("config") or {}
+            if not cfg.get("enabled", True):
+                continue
+            q_count = cfg.get("quota_count")
+            try:
+                q_count = int(q_count) if q_count is not None else None
+            except (ValueError, TypeError):
+                q_count = None
+            if not q_count or q_count <= 0:
+                continue
+            q_window = cfg.get("quota_window") or "month"
+            counts = _window_counts(wl["id"], now)
+            current_requested = counts.get(q_window, 0)
+            if current_requested < q_count:
+                pending = db.query(
+                    "SELECT id FROM candidates WHERE watchlist_id=? AND status != ? LIMIT 1",
+                    (wl["id"], STATUS_REQUESTED),
+                )
+                if pending:
+                    return True
+    except Exception as exc:
+        log.warning("unmet pace check failed: %s", exc)
+    return False
+
+
 def _scheduler_loop() -> None:
     import time
+    from datetime import datetime, timedelta, timezone
 
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -123,6 +159,7 @@ def _scheduler_loop() -> None:
         sched.add_job(
             engine.run_cycle,
             "interval",
+            kwargs={"sync": True, "request": False},
             minutes=mins,
             id="sync",
             max_instances=1,
@@ -136,6 +173,7 @@ def _scheduler_loop() -> None:
         sched.add_job(
             engine.run_cycle,
             "interval",
+            kwargs={"sync": False, "request": True},
             minutes=mins,
             id="request",
             max_instances=1,
@@ -146,14 +184,31 @@ def _scheduler_loop() -> None:
 
     schedule_sync()
     schedule_request()
+
+    # Initial request pass shortly after boot (10s grace period)
+    sched.add_job(
+        engine.run_cycle,
+        "date",
+        run_date=datetime.now(timezone.utc) + timedelta(seconds=10),
+        id="initial_request",
+        kwargs={"sync": False, "request": True},
+    )
+
     sched.start()
 
     # Re-apply the intervals periodically so a Settings change is picked up
-    # within ~5 minutes rather than only at the next container restart.
+    # within ~5 minutes, and check if an unmet pace needs an automatic retry pass.
+    last_unmet_retry = 0.0
     while not _shutdown_scheduler.wait(timeout=300):
         try:
             schedule_sync()
             schedule_request()
+            now_ts = time.time()
+            if now_ts - last_unmet_retry >= 900:  # 15 minutes minimum interval between retries
+                if _should_retry_unmet_pace():
+                    last_unmet_retry = now_ts
+                    log.info("Automatic pace check: unmet pace detected with pending candidates; running request cycle")
+                    engine.run_cycle(sync=False, request=True)
         except Exception as exc:
             log.warning("scheduler reschedule failed: %s", exc)
     sched.shutdown(wait=False)
