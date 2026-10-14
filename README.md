@@ -57,7 +57,7 @@ settings and request history.
 
 **Settings → Integrations**, paste:
 
-- **Seerr URL** — `http://192.168.1.35:5055` (or `http://jellyseerr:5055` on the same Docker network)
+- **Seerr URL** — `http://<seerr-host>:5055` (or `http://jellyseerr:5055` on the same Docker network)
 - **Seerr API key** — Seerr → Settings → General → API Key → *Show* → copy
 
 Press **Test Seerr connection**. You should see `Connected — Jellyseerr v2.x.x`.
