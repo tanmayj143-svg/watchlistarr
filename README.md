@@ -239,5 +239,10 @@ WATCHLISTARR_DATA=/tmp/wl .venv/bin/python -m app     # http://127.0.0.1:7777
 `test_e2e.py` hits the real Letterboxd and public metadata APIs, and runs a mock
 Seerr/Radarr on 127.0.0.1:5999.
 
-See `docs/` for the scoring reference, source notes, and `MASTER.md` for the
-full change log.
+See `docs/` for the scoring reference, source notes, and full change log.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE) © 2026 Tanmay Jain. See [`DISCLAIMER.md`](DISCLAIMER.md) for full disclaimer and attribution statements.
